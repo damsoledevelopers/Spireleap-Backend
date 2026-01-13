@@ -45,7 +45,10 @@ router.get('/', optionalAuth, [
       if (req.user.role === 'agency_admin') {
         filter.agency = req.user.agency;
       } else if (req.user.role === 'agent') {
-        filter.agent = req.user.id;
+        filter.$or = [
+          { agent: req.user.id },
+          { createdBy: req.user.id }
+        ];
       }
     }
 
@@ -79,7 +82,7 @@ router.get('/', optionalAuth, [
         { 'location.neighborhood': new RegExp(req.query.area, 'i') },
         { 'location.landmark': new RegExp(req.query.area, 'i') }
       ];
-      
+
       // If we already have $or from search, combine with $and
       if (filter.$or && filter.$or.length > 0) {
         filter.$and = filter.$and || [];
@@ -99,9 +102,9 @@ router.get('/', optionalAuth, [
       const minPrice = req.query.minPrice ? parseFloat(req.query.minPrice) : null;
       const maxPrice = req.query.maxPrice ? parseFloat(req.query.maxPrice) : null;
       const listingType = req.query.listingType;
-      
+
       const priceConditions = [];
-      
+
       // For sale properties or when listing type is not specified
       if (!listingType || listingType === 'sale' || listingType === 'both') {
         const salePriceFilter = {};
@@ -112,7 +115,7 @@ router.get('/', optionalAuth, [
           priceConditions.push(salePriceFilter);
         }
       }
-      
+
       // For rent properties or when listing type is not specified
       if (!listingType || listingType === 'rent' || listingType === 'both') {
         const rentPriceFilter = {};
@@ -123,7 +126,7 @@ router.get('/', optionalAuth, [
           priceConditions.push(rentPriceFilter);
         }
       }
-      
+
       if (priceConditions.length > 0) {
         if (priceConditions.length === 1) {
           // Single condition - merge directly into filter
@@ -177,7 +180,7 @@ router.get('/', optionalAuth, [
     if (req.query.search) {
       const searchTerm = req.query.search.trim();
       const searchRegex = new RegExp(searchTerm, 'i');
-      
+
       const searchConditions = [
         { title: searchRegex },
         { description: searchRegex },
@@ -193,13 +196,13 @@ router.get('/', optionalAuth, [
         { 'location.landmark': searchRegex },
         { 'location.zipCode': searchRegex }
       ];
-      
+
       // Search by agency name - find agencies matching the search term
       try {
         const matchingAgencies = await Agency.find({
           name: searchRegex
         }).select('_id');
-        
+
         if (matchingAgencies.length > 0) {
           const agencyIds = matchingAgencies.map(agency => agency._id);
           searchConditions.push({ agency: { $in: agencyIds } });
@@ -208,7 +211,7 @@ router.get('/', optionalAuth, [
         console.error('Error searching agencies:', error);
         // Continue with other search conditions even if agency search fails
       }
-      
+
       // Also search in price fields if search term is numeric
       if (!isNaN(searchTerm) && searchTerm !== '') {
         const numericValue = parseFloat(searchTerm);
@@ -220,7 +223,7 @@ router.get('/', optionalAuth, [
           { 'specifications.area.value': numericValue }
         );
       }
-      
+
       // If we already have $or from price filters or area filter, combine with $and
       if (filter.$or && filter.$or.length > 0) {
         filter.$and = filter.$and || [];
@@ -358,7 +361,7 @@ router.put('/:id/assign', [
 
     // Check permissions
     const propertyAgencyId = property.agency ? property.agency.toString() : null;
-    
+
     if (req.user.role === 'agency_admin' && propertyAgencyId && propertyAgencyId !== req.user.agency) {
       return res.status(403).json({ message: 'Access denied' });
     }
@@ -389,9 +392,9 @@ router.put('/:id/assign', [
       .populate('category', 'name')
       .populate('amenities', 'name icon');
 
-    res.json({ 
+    res.json({
       message: 'Property reassigned successfully',
-      property: updatedProperty 
+      property: updatedProperty
     });
   } catch (error) {
     console.error('Reassign property error:', error);
@@ -432,16 +435,16 @@ router.get('/:id', optionalAuth, async (req, res) => {
       }
     } else {
       // Get agency ID safely (handle both populated object and ObjectId)
-      const propertyAgencyId = property.agency 
-        ? (typeof property.agency === 'object' && property.agency._id 
-          ? property.agency._id.toString() 
+      const propertyAgencyId = property.agency
+        ? (typeof property.agency === 'object' && property.agency._id
+          ? property.agency._id.toString()
           : property.agency.toString())
         : null;
-      
+
       // Get agent ID safely (handle both populated object and ObjectId)
-      const propertyAgentId = property.agent 
-        ? (typeof property.agent === 'object' && property.agent._id 
-          ? property.agent._id.toString() 
+      const propertyAgentId = property.agent
+        ? (typeof property.agent === 'object' && property.agent._id
+          ? property.agent._id.toString()
           : property.agent.toString())
         : null;
 
@@ -464,7 +467,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
   } catch (error) {
     console.error('Get property error:', error);
     console.error('Error stack:', error.stack);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
@@ -490,16 +493,16 @@ router.get('/slug/:slug', optionalAuth, async (req, res) => {
       }
     } else {
       // Get agency ID safely (handle both populated object and ObjectId)
-      const propertyAgencyId = property.agency 
-        ? (typeof property.agency === 'object' && property.agency._id 
-          ? property.agency._id.toString() 
+      const propertyAgencyId = property.agency
+        ? (typeof property.agency === 'object' && property.agency._id
+          ? property.agency._id.toString()
           : property.agency.toString())
         : null;
-      
+
       // Get agent ID safely (handle both populated object and ObjectId)
-      const propertyAgentId = property.agent 
-        ? (typeof property.agent === 'object' && property.agent._id 
-          ? property.agent._id.toString() 
+      const propertyAgentId = property.agent
+        ? (typeof property.agent === 'object' && property.agent._id
+          ? property.agent._id.toString()
           : property.agent.toString())
         : null;
 
@@ -522,7 +525,7 @@ router.get('/slug/:slug', optionalAuth, async (req, res) => {
   } catch (error) {
     console.error('Get property by slug error:', error);
     console.error('Error stack:', error.stack);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
@@ -554,7 +557,7 @@ router.post('/', [
         return res.status(400).json({ message: 'Agency ID is required for super admin' });
       }
     }
-    
+
     if (!req.body.agent) {
       if (req.user.role === 'agent') {
         req.body.agent = req.user.id;
@@ -563,16 +566,16 @@ router.post('/', [
         // But if they do specify, validate it
       }
     }
-    
+
     // Now validate that agency and agent are present and valid
     if (!req.body.agency) {
       return res.status(400).json({ message: 'Agency ID is required' });
     }
-    
+
     if (!req.body.agent && req.user.role === 'agent') {
       return res.status(400).json({ message: 'Agent ID is required' });
     }
-    
+
     // Log the incoming request for debugging
     console.log('=== Property Creation Request ===');
     console.log('User:', {
@@ -598,7 +601,7 @@ router.post('/', [
         area: req.body.specifications.area
       } : 'Missing'
     });
-    
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       console.error('=== Validation Errors ===');
@@ -639,7 +642,16 @@ router.post('/', [
       return res.status(400).json({ message: 'Agent ID is required' });
     }
 
-    const property = new Property(req.body);
+    // Force status to pending for agents
+    if (req.user.role === 'agent') {
+      req.body.status = 'pending';
+    }
+
+    const property = new Property({
+      ...req.body,
+      createdBy: req.user.id,
+      creatorRole: req.user.role
+    });
     await property.save();
 
     const populatedProperty = await Property.findById(property._id)
@@ -677,7 +689,7 @@ router.put('/:id/approve', [
     const property = await Property.findById(req.params.id)
       .populate('agent', 'firstName lastName email phone')
       .populate('agency', 'name');
-    
+
     if (!property) {
       return res.status(404).json({ message: 'Property not found' });
     }
@@ -688,9 +700,9 @@ router.put('/:id/approve', [
       const propertyAgencyId = typeof property.agency === 'object' && property.agency._id
         ? property.agency._id.toString()
         : property.agency?.toString() || property.agency
-      
+
       const userAgencyId = req.user.agency?.toString() || req.user.agency
-      
+
       if (propertyAgencyId !== userAgencyId) {
         console.error('Agency mismatch:', {
           propertyAgencyId,
@@ -704,7 +716,7 @@ router.put('/:id/approve', [
 
     const oldStatus = property.status;
     property.status = req.body.status;
-    
+
     if (req.body.status === 'inactive' && req.body.rejectionReason) {
       property.rejectionReason = req.body.rejectionReason;
     } else if (req.body.status === 'active') {
@@ -734,9 +746,9 @@ router.put('/:id/approve', [
       .populate('category', 'name')
       .populate('amenities', 'name icon');
 
-    res.json({ 
+    res.json({
       message: `Property ${req.body.status === 'active' ? 'approved' : 'rejected'} successfully`,
-      property: updatedProperty 
+      property: updatedProperty
     });
   } catch (error) {
     console.error('Approve property error:', error);
@@ -771,19 +783,22 @@ router.put('/:id', [
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    // Prevent agents from changing status from pending to active (self-approval)
+    // Creator-based permission restrictions
+    if (property.creatorRole === 'agent') {
+      // If property was created by an agent, agency_admin and super_admin cannot edit it
+      if (req.user.role === 'agency_admin' || req.user.role === 'super_admin') {
+        return res.status(403).json({ message: 'Access denied. Only the property creator (agent) can edit this property.' });
+      }
+    } else if (property.creatorRole === 'agency_admin') {
+      // If property was created by an agency admin, super_admin cannot edit it
+      if (req.user.role === 'super_admin') {
+        return res.status(403).json({ message: 'Access denied. Only the agency admin who created this property can edit it.' });
+      }
+    }
+
+    // Force status back to pending if edited by an agent to require re-approval
     if (req.user.role === 'agent') {
-      if (property.status === 'pending' && req.body.status === 'active') {
-        return res.status(403).json({ 
-          message: 'You cannot approve your own property. Please wait for agency admin approval.' 
-        });
-      }
-      // Agents can only change status of approved properties (active -> sold/rented/inactive)
-      if (property.status === 'pending' && req.body.status && req.body.status !== 'pending' && req.body.status !== 'draft') {
-        return res.status(403).json({ 
-          message: 'You cannot change status of pending properties. Please wait for agency admin approval.' 
-        });
-      }
+      req.body.status = 'pending';
     }
 
     Object.assign(property, req.body);
@@ -843,7 +858,7 @@ router.post('/compare', optionalAuth, [
     }
 
     const { propertyIds } = req.body;
-    
+
     if (propertyIds.length < 2 || propertyIds.length > 5) {
       return res.status(400).json({ message: 'Please select 2-5 properties to compare' });
     }
@@ -864,7 +879,7 @@ router.post('/compare', optionalAuth, [
     // Helper function to find common amenities
     const findCommonAmenities = (props) => {
       if (props.length === 0) return [];
-      
+
       const amenityCounts = {};
       props.forEach(property => {
         if (property.amenities) {

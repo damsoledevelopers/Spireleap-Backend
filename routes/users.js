@@ -11,7 +11,7 @@ const router = express.Router();
 // @access  Private (Super Admin only)
 router.post('/', [
   auth,
-  authorize('super_admin'),
+  authorize('super_admin', 'agency_admin'),
   body('firstName').trim().notEmpty().withMessage('First name is required'),
   body('lastName').trim().notEmpty().withMessage('Last name is required'),
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
@@ -25,7 +25,7 @@ router.post('/', [
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'Validation failed',
         errors: errors.array()
       });
@@ -43,6 +43,19 @@ router.post('/', [
       isActive = true
     } = req.body;
 
+    // Agency Admin restrictions
+    if (req.user.role === 'agency_admin') {
+      // Can only create agents or staff (or generic users)
+      if (['super_admin', 'agency_admin'].includes(role)) {
+        return res.status(403).json({ message: 'Agency admins can only create agents or staff' });
+      }
+      // Force agency to be their own
+      if (agency && agency !== req.user.agency.toString()) {
+        // If they tried to pass a different agency
+        return res.status(403).json({ message: 'You can only create users for your own agency' });
+      }
+    }
+
     // Check if user already exists
     const existingUser = await User.findOne({ email });
     if (existingUser) {
@@ -58,7 +71,8 @@ router.post('/', [
       phone,
       address,
       role,
-      agency: agency || null,
+      role,
+      agency: req.user.role === 'agency_admin' ? req.user.agency : (agency || null),
       isActive
     };
 
@@ -90,7 +104,7 @@ router.get('/', [
     const page = parseInt(req.query.page) || 1;
     const limit = parseInt(req.query.limit) || 10;
     const skip = (page - 1) * limit;
-    
+
     const {
       role,
       search,
@@ -102,15 +116,15 @@ router.get('/', [
 
     // Build filter object
     const filter = {};
-    
+
     if (role) {
       filter.role = role;
     }
-    
+
     if (isActive !== undefined) {
       filter.isActive = isActive === 'true';
     }
-    
+
     if (search) {
       filter.$or = [
         { firstName: { $regex: search, $options: 'i' } },
@@ -177,7 +191,7 @@ router.get('/stats/overview', [
         }
       }
     ]);
-    
+
     const recentUsers = await User.find()
       .select('firstName lastName email role createdAt')
       .sort({ createdAt: -1 })
@@ -225,7 +239,7 @@ router.get('/:id', [
     const user = await User.findById(req.params.id)
       .select('-password')
       .populate('agency', 'name logo');
-    
+
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -242,7 +256,7 @@ router.get('/:id', [
         targetUserAgencyId = user.agency;
       }
     }
-    
+
     // Get requesting user agency ID (handle both populated object and ID string)
     let requestingUserAgencyId = null;
     if (req.user.agency) {
@@ -263,8 +277,8 @@ router.get('/:id', [
     // Agency admin can only view users from their agency
     if (req.user.role === 'agency_admin') {
       if (!requestingUserAgencyId || targetUserAgencyId !== requestingUserAgencyId) {
-      return res.status(403).json({ message: 'Not authorized to view this user' });
-    }
+        return res.status(403).json({ message: 'Not authorized to view this user' });
+      }
       return res.json(user);
     }
 
@@ -274,7 +288,7 @@ router.get('/:id', [
     }
 
     // All other cases: deny access
-      return res.status(403).json({ message: 'Not authorized to view this user' });
+    return res.status(403).json({ message: 'Not authorized to view this user' });
   } catch (error) {
     console.error('Get user error:', error);
     // Handle CastError (invalid ObjectId)
@@ -324,10 +338,10 @@ router.put('/:id', [
 
     // Check access permissions
     // Get user agency ID (handle both populated object and ID string)
-    const targetUserAgencyId = user.agency?._id 
-      ? user.agency._id.toString() 
+    const targetUserAgencyId = user.agency?._id
+      ? user.agency._id.toString()
       : (user.agency?.toString() || user.agency);
-    
+
     // Get requesting user agency ID (handle both populated object and ID string)
     const requestingUserAgencyId = req.user.agency?._id
       ? req.user.agency._id.toString()
@@ -395,7 +409,7 @@ router.put('/:id', [
 
       // Fetch the updated user without password
       const updatedUser = await User.findById(req.params.id).select('-password');
-      
+
       res.json({
         message: 'User updated successfully',
         user: updatedUser
@@ -458,7 +472,7 @@ router.put('/:id/status', [
 
     // Agency admin can only update users from their agency
     if (req.user.role === 'agency_admin' && user.agency?.toString() !== req.user.agency) {
-      return res.status(403).json({ 
+      return res.status(403).json({
         message: 'Not authorized to update this user status'
       });
     }
@@ -525,7 +539,7 @@ router.delete('/:id', [
 
     // Agency admin can only delete users from their agency
     if (req.user.role === 'agency_admin' && user.agency?.toString() !== req.user.agency) {
-      return res.status(403).json({ 
+      return res.status(403).json({
         message: 'Not authorized to delete this user'
       });
     }

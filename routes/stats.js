@@ -14,7 +14,7 @@ const router = express.Router();
 router.get('/dashboard', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
   try {
     const filter = {};
-    
+
     // Role-based filtering
     if (req.user.role === 'agency_admin') {
       filter.agency = req.user.agency;
@@ -35,30 +35,30 @@ router.get('/dashboard', auth, authorize('super_admin', 'agency_admin', 'agent',
       inquiriesByAgency
     ] = await Promise.all([
       // Total agencies (only for super_admin)
-      req.user.role === 'super_admin' 
+      req.user.role === 'super_admin'
         ? Agency.countDocuments()
         : Promise.resolve(0),
-      
+
       // Total properties
       Property.countDocuments(filter),
-      
+
       // Active properties
       Property.countDocuments({ ...filter, status: 'active' }),
-      
+
       // Total leads
       Lead.countDocuments(filter),
-      
+
       // Active leads
-      Lead.countDocuments({ 
-        ...filter, 
-        status: { $in: ['new', 'contacted', 'site_visit_scheduled', 'site_visit_completed', 'negotiation'] } 
+      Lead.countDocuments({
+        ...filter,
+        status: { $in: ['new', 'contacted', 'site_visit_scheduled', 'site_visit_completed', 'negotiation'] }
       }),
-      
+
       // Total users (only for super_admin)
       req.user.role === 'super_admin'
         ? User.countDocuments()
         : User.countDocuments({ ...filter, role: 'agent' }),
-      
+
       // Inquiry stats by source (aggregation)
       Lead.aggregate([
         { $match: filter },
@@ -69,38 +69,38 @@ router.get('/dashboard', auth, authorize('super_admin', 'agency_admin', 'agent',
           }
         }
       ]),
-      
+
       // Inquiries by agency (only for super_admin)
       req.user.role === 'super_admin'
         ? Lead.aggregate([
-            {
-              $group: {
-                _id: '$agency',
-                count: { $sum: 1 }
-              }
-            },
-            {
-              $lookup: {
-                from: 'agencies',
-                localField: '_id',
-                foreignField: '_id',
-                as: 'agency'
-              }
-            },
-            {
-              $unwind: {
-                path: '$agency',
-                preserveNullAndEmptyArrays: true
-              }
-            },
-            {
-              $project: {
-                name: { $ifNull: ['$agency.name', 'Unknown Agency'] },
-                count: 1
-              }
-            },
-            { $limit: 10 }
-          ])
+          {
+            $group: {
+              _id: '$agency',
+              count: { $sum: 1 }
+            }
+          },
+          {
+            $lookup: {
+              from: 'agencies',
+              localField: '_id',
+              foreignField: '_id',
+              as: 'agency'
+            }
+          },
+          {
+            $unwind: {
+              path: '$agency',
+              preserveNullAndEmptyArrays: true
+            }
+          },
+          {
+            $project: {
+              name: { $ifNull: ['$agency.name', 'Unknown Agency'] },
+              count: 1
+            }
+          },
+          { $limit: 10 }
+        ])
         : Promise.resolve([])
     ]);
 
@@ -263,14 +263,14 @@ router.get('/reports', auth, authorize('super_admin', 'agency_admin'), async (re
       // Users by role (only for super_admin)
       req.user.role === 'super_admin'
         ? User.aggregate([
-            { $match: dateFilter },
-            {
-              $group: {
-                _id: '$role',
-                count: { $sum: 1 }
-              }
+          { $match: dateFilter },
+          {
+            $group: {
+              _id: '$role',
+              count: { $sum: 1 }
             }
-          ])
+          }
+        ])
         : Promise.resolve([]),
 
       // Total property value (sale prices only)

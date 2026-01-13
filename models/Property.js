@@ -165,6 +165,14 @@ const propertySchema = new mongoose.Schema({
     enum: ['draft', 'pending', 'active', 'sold', 'rented', 'inactive'],
     default: 'pending'
   },
+  createdBy: {
+    type: mongoose.Schema.Types.ObjectId,
+    ref: 'User'
+  },
+  creatorRole: {
+    type: String,
+    enum: ['super_admin', 'agency_admin', 'agent']
+  },
   rejectionReason: {
     type: String,
     trim: true
@@ -223,7 +231,7 @@ const propertySchema = new mongoose.Schema({
 });
 
 // Generate slug before saving
-propertySchema.pre('save', function(next) {
+propertySchema.pre('save', function (next) {
   if (this.isModified('title') && !this.slug) {
     this.slug = this.title
       .toLowerCase()
