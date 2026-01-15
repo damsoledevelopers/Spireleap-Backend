@@ -82,8 +82,8 @@ const leadSchema = new mongoose.Schema({
   },
   priority: {
     type: String,
-    enum: ['hot', 'warm', 'cold', 'not_interested'],
-    default: 'warm'
+    enum: ['Hot', 'Warm', 'Cold', 'Not_interested'],
+    default: 'Warm'
   },
   agency: {
     type: mongoose.Schema.Types.ObjectId,
@@ -364,7 +364,7 @@ const leadSchema = new mongoose.Schema({
 });
 
 // Auto-generate leadId before saving
-leadSchema.pre('save', async function(next) {
+leadSchema.pre('save', async function (next) {
   if (!this.leadId) {
     try {
       // Find the highest existing leadId number
@@ -372,7 +372,7 @@ leadSchema.pre('save', async function(next) {
       const lastLead = await Lead.findOne({ leadId: { $exists: true, $ne: null } })
         .sort({ leadId: -1 })
         .select('leadId');
-      
+
       let nextNumber = 1;
       if (lastLead && lastLead.leadId) {
         // Extract number from leadId (e.g., "LEAD-000054" -> 54)
@@ -381,7 +381,7 @@ leadSchema.pre('save', async function(next) {
           nextNumber = parseInt(match[0], 10) + 1;
         }
       }
-      
+
       // Generate new leadId and check for uniqueness
       let attempts = 0;
       let newLeadId;

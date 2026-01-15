@@ -19,6 +19,8 @@ router.get('/', optionalAuth, [
   query('country').optional(),
   query('area').optional(),
   query('agency').optional(),
+  query('category').optional(),
+  query('amenities').optional(),
   query('minPrice').optional().isFloat({ min: 0 }),
   query('maxPrice').optional().isFloat({ min: 0 }),
   query('bedrooms').optional().isInt({ min: 0 }),
@@ -95,6 +97,29 @@ router.get('/', optionalAuth, [
     // Agency filter
     if (req.query.agency) {
       filter.agency = req.query.agency;
+    }
+
+    // Category filter
+    if (req.query.category) {
+      const categoryId = req.query.category.trim();
+      if (mongoose.Types.ObjectId.isValid(categoryId)) {
+        filter.category = new mongoose.Types.ObjectId(categoryId);
+      }
+    }
+
+    // Amenities filter (comma-separated list of amenity IDs)
+    if (req.query.amenities) {
+      const raw = req.query.amenities;
+      const ids = raw
+        .split(',')
+        .map(id => id.trim())
+        .filter(id => mongoose.Types.ObjectId.isValid(id))
+        .map(id => new mongoose.Types.ObjectId(id));
+
+      if (ids.length > 0) {
+        // Match properties that have at least one of the selected amenities
+        filter.amenities = { $in: ids };
+      }
     }
 
     // Price filters

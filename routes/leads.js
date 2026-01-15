@@ -16,24 +16,58 @@ const encryptionService = require('../services/encryptionService');
 const router = express.Router();
 
 // Helper function to normalize lead priority
-const normalizeLeadPriority = (lead) => {
-  if (lead && lead.priority) {
-    const validPriorities = ['hot', 'warm', 'cold', 'not_interested'];
-    const priorityMap = {
-      'high': 'hot',
-      'medium': 'warm',
-      'low': 'cold',
-      'urgent': 'hot',
-      'hot': 'hot',
-      'warm': 'warm',
-      'cold': 'cold',
-      'not_interested': 'not_interested'
-    };
+const getNormalizedPriority = (priority) => {
+  const validPriorities = ['Hot', 'Warm', 'Cold', 'Not_interested'];
+  const priorityMap = {
+    'high': 'Hot',
+    'medium': 'Warm',
+    'low': 'Cold',
+    'urgent': 'Hot',
+    'hot': 'Hot',
+    'warm': 'Warm',
+    'cold': 'Cold',
+    'not_interested': 'Not_interested'
+  };
 
-    const currentPriority = lead.priority.toLowerCase();
-    if (!validPriorities.includes(currentPriority)) {
-      lead.priority = priorityMap[currentPriority] || 'warm';
-    }
+  if (!priority) return 'Warm';
+  const p = String(priority).toLowerCase();
+
+  // Check if it's already a valid capitalized priority
+  const normalizedValid = validPriorities.find(v => v.toLowerCase() === p);
+  if (normalizedValid) return normalizedValid;
+
+  return priorityMap[p] || 'Warm';
+};
+
+// Helper function to normalize lead source
+const getNormalizedSource = (source) => {
+  const validSources = ['website', 'phone', 'email', 'walk_in', 'referral', 'social_media', 'other'];
+  const sourceMap = {
+    'fb': 'social_media',
+    'facebook': 'social_media',
+    'instagram': 'social_media',
+    'google': 'social_media',
+    'social': 'social_media',
+    'call': 'phone',
+    'personal': 'walk_in'
+  };
+
+  if (!source) return 'website';
+  const s = String(source).toLowerCase();
+  return sourceMap[s] || (validSources.includes(s) ? s : 'other');
+};
+
+const normalizeLeadPriority = (lead) => {
+  if (lead) {
+    lead.priority = getNormalizedPriority(lead.priority);
+  }
+  return lead;
+};
+
+const normalizeLeadData = (lead) => {
+  if (lead) {
+    lead.priority = getNormalizedPriority(lead.priority);
+    lead.source = getNormalizedSource(lead.source);
   }
   return lead;
 };
@@ -45,7 +79,7 @@ router.get('/', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff')
   query('page').optional().isInt({ min: 1 }),
   query('limit').optional().isInt({ min: 1, max: 500 }),
   query('status').optional().isIn(['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation', 'booked', 'lost', 'closed', 'junk']),
-  query('priority').optional().isIn(['hot', 'warm', 'cold', 'not_interested'])
+  query('priority').optional().isIn(['Hot', 'Warm', 'Cold', 'Not_interested'])
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -215,6 +249,8 @@ router.get('/', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff')
       if (leadObj.contact) {
         leadObj.contact = encryptionService.decryptLeadContact(leadObj.contact);
       }
+      // Normalize data for display consistency
+      normalizeLeadData(leadObj);
       return leadObj;
     });
 
@@ -303,6 +339,9 @@ router.get('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
       leadObj.contact = encryptionService.decryptLeadContact(leadObj.contact);
     }
 
+    // Normalize data for display consistency
+    normalizeLeadData(leadObj);
+
     res.json({ lead: leadObj });
   } catch (error) {
     console.error('Get lead error:', error);
@@ -388,35 +427,15 @@ router.post('/', optionalAuth, [
       }
     }
 
-    // Validate and normalize priority
-    const validPriorities = ['hot', 'warm', 'cold', 'not_interested'];
-    let priority = req.body.priority ? req.body.priority.toLowerCase() : 'warm';
-
     // Map common frontend values to backend values
-    const priorityMap = {
-      'high': 'hot',
-      'medium': 'warm',
-      'low': 'cold',
-      'urgent': 'hot',
-      'hot': 'hot',
-      'warm': 'warm',
-      'cold': 'cold',
-      'not_interested': 'not_interested'
-    };
-
-    priority = priorityMap[priority] || (validPriorities.includes(priority) ? priority : 'warm');
+    const priority = getNormalizedPriority(req.body.priority);
+    const source = getNormalizedSource(req.body.source);
 
     // Validate and normalize status
     const validStatuses = ['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation', 'booked', 'lost', 'closed', 'junk'];
     const status = req.body.status && validStatuses.includes(req.body.status.toLowerCase())
       ? req.body.status.toLowerCase()
       : 'new';
-
-    // Validate and normalize source
-    const validSources = ['website', 'phone', 'email', 'walk_in', 'referral', 'social_media', 'other'];
-    const source = req.body.source && validSources.includes(req.body.source.toLowerCase())
-      ? req.body.source.toLowerCase()
-      : 'website';
 
     const leadData = {
       ...req.body,
@@ -586,27 +605,18 @@ router.put('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
       }
     }
 
-    // Normalize priority if provided
-    if (req.body.hasOwnProperty('priority')) {
-      if (req.body.priority === null || req.body.priority === '' || req.body.priority === undefined) {
-        // Allow setting priority to null/empty/undefined
-        req.body.priority = undefined;
-      } else {
-        const validPriorities = ['hot', 'warm', 'cold', 'not_interested'];
-        const priorityMap = {
-          'high': 'hot',
-          'medium': 'warm',
-          'low': 'cold',
-          'urgent': 'hot',
-          'hot': 'hot',
-          'warm': 'warm',
-          'cold': 'cold',
-          'not_interested': 'not_interested'
-        };
+    // Capture previous state for webhooks and logic
+    const previousStatus = lead.status;
+    const previousPriority = lead.priority;
+    const previousAssignedAgent = lead.assignedAgent;
 
-        const currentPriority = String(req.body.priority).toLowerCase();
-        req.body.priority = priorityMap[currentPriority] || (validPriorities.includes(currentPriority) ? currentPriority : 'warm');
-      }
+    // Normalize priority and source if provided
+    if (req.body.hasOwnProperty('priority')) {
+      req.body.priority = getNormalizedPriority(req.body.priority);
+    }
+
+    if (req.body.hasOwnProperty('source')) {
+      req.body.source = getNormalizedSource(req.body.source);
     }
 
     // Normalize status if provided
@@ -625,20 +635,6 @@ router.put('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
         req.body.status = statusMap[currentStatus] || 'new';
       }
     }
-
-    // Normalize source if provided
-    if (req.body.source) {
-      const validSources = ['website', 'phone', 'email', 'walk_in', 'referral', 'social_media', 'other'];
-      const currentSource = req.body.source.toLowerCase();
-      if (validSources.includes(currentSource)) {
-        req.body.source = currentSource;
-      } else {
-        req.body.source = 'other';
-      }
-    }
-
-    // Normalize lead priority before assigning
-    normalizeLeadPriority(lead);
 
     // Encrypt contact information if being updated
     if (req.body.contact) {
@@ -678,8 +674,7 @@ router.put('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
     delete fieldsToAssign.booking;
     Object.assign(lead, fieldsToAssign);
 
-    // Normalize again after assignment to ensure it's valid
-    normalizeLeadPriority(lead);
+    // We already normalized at the beginning
 
     await lead.save();
 
@@ -773,7 +768,7 @@ router.post('/:id/notes', auth, authorize('super_admin', 'agency_admin', 'agent'
     }
 
     // Normalize priority before saving
-    normalizeLeadPriority(lead);
+    normalizeLeadData(lead);
 
     lead.notes.push({
       note: req.body.note,
@@ -802,7 +797,7 @@ router.post('/:id/communications', auth, authorize('super_admin', 'agency_admin'
     }
 
     // Normalize priority before saving
-    normalizeLeadPriority(lead);
+    normalizeLeadData(lead);
 
     const communication = {
       ...req.body,
@@ -891,7 +886,7 @@ router.post('/:id/tasks', auth, authorize('super_admin', 'agency_admin', 'agent'
     }
 
     // Normalize priority before saving
-    normalizeLeadPriority(lead);
+    normalizeLeadData(lead);
 
     lead.tasks.push({
       ...req.body,
@@ -1076,7 +1071,7 @@ router.post('/:id/reminders', auth, authorize('super_admin', 'agency_admin', 'ag
     }
 
     // Normalize priority before saving
-    normalizeLeadPriority(lead);
+    normalizeLeadData(lead);
 
     lead.reminders.push({
       title: req.body.title.trim(),
@@ -1800,7 +1795,7 @@ router.post('/bulk', auth, authorize('super_admin', 'agency_admin'), async (req,
 
         // Validate status and priority
         const validStatuses = ['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation', 'booked', 'lost', 'closed', 'junk'];
-        const validPriorities = ['hot', 'warm', 'cold', 'not_interested'];
+        const validPriorities = ['Hot', 'Warm', 'Cold', 'Not_interested'];
         const validSources = ['website', 'phone', 'email', 'walk_in', 'referral', 'social_media', 'other'];
 
         // Encrypt contact information if encryption is enabled
