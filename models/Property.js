@@ -162,7 +162,7 @@ const propertySchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['draft', 'pending', 'active', 'sold', 'rented', 'inactive'],
+    enum: ['draft', 'pending', 'active', 'sold', 'rented', 'inactive', 'unavailable'],
     default: 'pending'
   },
   createdBy: {
@@ -225,7 +225,24 @@ const propertySchema = new mongoose.Schema({
       type: Date,
       default: Date.now
     }
-  }]
+  }],
+  entryPermissions: {
+    agency_admin: {
+      view: { type: Boolean, default: true },
+      edit: { type: Boolean, default: true },
+      delete: { type: Boolean, default: false }
+    },
+    agent: {
+      view: { type: Boolean, default: true },
+      edit: { type: Boolean, default: true },
+      delete: { type: Boolean, default: false }
+    },
+    staff: {
+      view: { type: Boolean, default: true },
+      edit: { type: Boolean, default: true },
+      delete: { type: Boolean, default: false }
+    }
+  }
 }, {
   timestamps: true
 });

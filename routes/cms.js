@@ -9,7 +9,10 @@ const Testimonial = require('../models/Testimonial');
 const ContactMessage = require('../models/ContactMessage');
 const Footer = require('../models/Footer');
 const Agency = require('../models/Agency');
-const { auth, authorize, optionalAuth } = require('../middleware/auth');
+const Script = require('../models/Script');
+const User = require('../models/User');
+const emailService = require('../services/emailService');
+const { auth, authorize, optionalAuth, checkModulePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
@@ -28,7 +31,7 @@ router.get('/blogs', optionalAuth, async (req, res) => {
     }
 
     const limit = parseInt(req.query.limit) || (req.user && (req.user.role === 'super_admin' || req.user.role === 'agency_admin') ? 100 : 10);
-    
+
     const blogs = await Blog.find(filter)
       .populate('author', 'firstName lastName profileImage')
       .populate('category', 'name slug')
@@ -68,7 +71,7 @@ router.get('/blogs/:slug', async (req, res) => {
 // @route   POST /api/cms/blogs
 // @desc    Create blog
 // @access  Private (Super Admin, Agency Admin)
-router.post('/blogs', auth, authorize('super_admin', 'agency_admin'), [
+router.post('/blogs', auth, checkModulePermission('cms', 'create'), [
   body('title').trim().notEmpty().withMessage('Title is required'),
   body('content').notEmpty().withMessage('Content is required')
 ], async (req, res) => {
@@ -76,6 +79,11 @@ router.post('/blogs', auth, authorize('super_admin', 'agency_admin'), [
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ errors: errors.array() });
+    }
+
+    // Ensure SEO keywords is an array if it's a string
+    if (req.body.seo && typeof req.body.seo.keywords === 'string') {
+      req.body.seo.keywords = req.body.seo.keywords.split(',').map(k => k.trim()).filter(k => k);
     }
 
     const blog = new Blog({
@@ -92,6 +100,18 @@ router.post('/blogs', auth, authorize('super_admin', 'agency_admin'), [
     res.status(201).json({ blog: populatedBlog });
   } catch (error) {
     console.error('Create blog error:', error);
+
+    // Handle Mongoose validation errors
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(err => err.message);
+      return res.status(400).json({ message: 'Validation error', errors: messages });
+    }
+
+    // Handle duplicate slug/title error
+    if (error.code === 11000) {
+      return res.status(400).json({ message: 'A blog with this title already exists' });
+    }
+
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -99,7 +119,7 @@ router.post('/blogs', auth, authorize('super_admin', 'agency_admin'), [
 // @route   PUT /api/cms/blogs/:id
 // @desc    Update blog
 // @access  Private
-router.put('/blogs/:id', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.put('/blogs/:id', auth, checkModulePermission('cms', 'edit'), async (req, res) => {
   try {
     const blog = await Blog.findById(req.params.id);
     if (!blog) {
@@ -122,7 +142,7 @@ router.put('/blogs/:id', auth, authorize('super_admin', 'agency_admin'), async (
 // @route   DELETE /api/cms/blogs/:id
 // @desc    Delete blog
 // @access  Private
-router.delete('/blogs/:id', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.delete('/blogs/:id', auth, checkModulePermission('cms', 'delete'), async (req, res) => {
   try {
     const blog = await Blog.findById(req.params.id);
     if (!blog) {
@@ -177,7 +197,7 @@ router.get('/pages/:slug', async (req, res) => {
 // @route   POST /api/cms/pages
 // @desc    Create page
 // @access  Private (Super Admin)
-router.post('/pages', auth, authorize('super_admin'), [
+router.post('/pages', auth, checkModulePermission('cms', 'create'), [
   body('title').trim().notEmpty().withMessage('Title is required'),
   body('slug').trim().notEmpty().withMessage('Slug is required'),
   body('content').notEmpty().withMessage('Content is required')
@@ -200,7 +220,7 @@ router.post('/pages', auth, authorize('super_admin'), [
 // @route   PUT /api/cms/pages/:id
 // @desc    Update page
 // @access  Private
-router.put('/pages/:id', auth, authorize('super_admin'), async (req, res) => {
+router.put('/pages/:id', auth, checkModulePermission('cms', 'edit'), async (req, res) => {
   try {
     const page = await Page.findById(req.params.id);
     if (!page) {
@@ -219,7 +239,7 @@ router.put('/pages/:id', auth, authorize('super_admin'), async (req, res) => {
 // @route   DELETE /api/cms/pages/:id
 // @desc    Delete page
 // @access  Private
-router.delete('/pages/:id', auth, authorize('super_admin'), async (req, res) => {
+router.delete('/pages/:id', auth, checkModulePermission('cms', 'delete'), async (req, res) => {
   try {
     const page = await Page.findById(req.params.id);
     if (!page) {
@@ -247,7 +267,7 @@ router.get('/banners', optionalAuth, async (req, res) => {
     if (!req.user || (req.user.role !== 'super_admin' && req.user.role !== 'agency_admin')) {
       filter.isActive = true;
     }
-    
+
     if (req.query.position) {
       filter.$or = [
         { position: req.query.position },
@@ -271,7 +291,7 @@ router.get('/banners', optionalAuth, async (req, res) => {
 // @route   POST /api/cms/banners
 // @desc    Create banner
 // @access  Private (Super Admin)
-router.post('/banners', auth, authorize('super_admin'), [
+router.post('/banners', auth, checkModulePermission('cms', 'create'), [
   body('title').trim().notEmpty().withMessage('Title is required'),
   body('image').notEmpty().withMessage('Image is required')
 ], async (req, res) => {
@@ -293,7 +313,7 @@ router.post('/banners', auth, authorize('super_admin'), [
 // @route   PUT /api/cms/banners/:id
 // @desc    Update banner
 // @access  Private
-router.put('/banners/:id', auth, authorize('super_admin'), async (req, res) => {
+router.put('/banners/:id', auth, checkModulePermission('cms', 'edit'), async (req, res) => {
   try {
     const banner = await Banner.findById(req.params.id);
     if (!banner) {
@@ -312,7 +332,7 @@ router.put('/banners/:id', auth, authorize('super_admin'), async (req, res) => {
 // @route   DELETE /api/cms/banners/:id
 // @desc    Delete banner
 // @access  Private
-router.delete('/banners/:id', auth, authorize('super_admin'), async (req, res) => {
+router.delete('/banners/:id', auth, checkModulePermission('cms', 'delete'), async (req, res) => {
   try {
     const banner = await Banner.findById(req.params.id);
     if (!banner) {
@@ -351,7 +371,7 @@ router.get('/categories', optionalAuth, async (req, res) => {
 // @route   POST /api/cms/categories
 // @desc    Create category
 // @access  Private (Super Admin)
-router.post('/categories', auth, authorize('super_admin'), [
+router.post('/categories', auth, checkModulePermission('cms', 'create'), [
   body('name').trim().notEmpty().withMessage('Category name is required')
 ], async (req, res) => {
   try {
@@ -372,7 +392,7 @@ router.post('/categories', auth, authorize('super_admin'), [
 // @route   PUT /api/cms/categories/:id
 // @desc    Update category
 // @access  Private
-router.put('/categories/:id', auth, authorize('super_admin'), async (req, res) => {
+router.put('/categories/:id', auth, checkModulePermission('cms', 'edit'), async (req, res) => {
   try {
     const category = await Category.findById(req.params.id);
     if (!category) {
@@ -391,7 +411,7 @@ router.put('/categories/:id', auth, authorize('super_admin'), async (req, res) =
 // @route   DELETE /api/cms/categories/:id
 // @desc    Delete category
 // @access  Private
-router.delete('/categories/:id', auth, authorize('super_admin'), async (req, res) => {
+router.delete('/categories/:id', auth, checkModulePermission('cms', 'delete'), async (req, res) => {
   try {
     const category = await Category.findById(req.params.id);
     if (!category) {
@@ -433,7 +453,7 @@ router.get('/amenities', optionalAuth, async (req, res) => {
 // @route   POST /api/cms/amenities
 // @desc    Create amenity
 // @access  Private (Super Admin)
-router.post('/amenities', auth, authorize('super_admin'), [
+router.post('/amenities', auth, checkModulePermission('cms', 'create'), [
   body('name').trim().notEmpty().withMessage('Amenity name is required'),
   body('category')
     .optional({ values: 'falsy' })
@@ -453,8 +473,8 @@ router.post('/amenities', auth, authorize('super_admin'), [
     const amenityData = {
       name: req.body.name.trim(),
       icon: req.body.icon?.trim() || undefined,
-      category: req.body.category && req.body.category.trim() && ['interior', 'exterior', 'community', 'security', 'other'].includes(req.body.category.trim()) 
-        ? req.body.category.trim() 
+      category: req.body.category && req.body.category.trim() && ['interior', 'exterior', 'community', 'security', 'other'].includes(req.body.category.trim())
+        ? req.body.category.trim()
         : 'other',
       order: parseInt(req.body.order) || 0,
       isActive: req.body.isActive !== undefined ? Boolean(req.body.isActive) : true
@@ -465,19 +485,19 @@ router.post('/amenities', auth, authorize('super_admin'), [
     res.status(201).json({ amenity });
   } catch (error) {
     console.error('Create amenity error:', error);
-    
+
     // Return more specific error messages
     if (error.name === 'ValidationError') {
       const errors = Object.values(error.errors).map(err => err.message);
       return res.status(400).json({ message: 'Validation error', errors });
     }
-    
+
     if (error.code === 11000) {
       // Duplicate key error (unique constraint violation)
       return res.status(400).json({ message: 'An amenity with this name already exists' });
     }
-    
-    res.status(500).json({ 
+
+    res.status(500).json({
       message: error.message || 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
@@ -487,7 +507,7 @@ router.post('/amenities', auth, authorize('super_admin'), [
 // @route   PUT /api/cms/amenities/:id
 // @desc    Update amenity
 // @access  Private
-router.put('/amenities/:id', auth, authorize('super_admin'), async (req, res) => {
+router.put('/amenities/:id', auth, checkModulePermission('cms', 'edit'), async (req, res) => {
   try {
     const amenity = await Amenity.findById(req.params.id);
     if (!amenity) {
@@ -506,7 +526,7 @@ router.put('/amenities/:id', auth, authorize('super_admin'), async (req, res) =>
 // @route   DELETE /api/cms/amenities/:id
 // @desc    Delete amenity
 // @access  Private
-router.delete('/amenities/:id', auth, authorize('super_admin'), async (req, res) => {
+router.delete('/amenities/:id', auth, checkModulePermission('cms', 'delete'), async (req, res) => {
   try {
     const amenity = await Amenity.findById(req.params.id);
     if (!amenity) {
@@ -553,7 +573,7 @@ router.get('/testimonials', optionalAuth, async (req, res) => {
 // @route   POST /api/cms/testimonials
 // @desc    Create testimonial
 // @access  Private (Super Admin, Agency Admin)
-router.post('/testimonials', auth, authorize('super_admin', 'agency_admin'), [
+router.post('/testimonials', auth, checkModulePermission('cms', 'create'), [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('role').trim().notEmpty().withMessage('Role is required'),
   body('content').trim().notEmpty().withMessage('Content is required'),
@@ -577,7 +597,7 @@ router.post('/testimonials', auth, authorize('super_admin', 'agency_admin'), [
 // @route   PUT /api/cms/testimonials/:id
 // @desc    Update testimonial
 // @access  Private
-router.put('/testimonials/:id', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.put('/testimonials/:id', auth, checkModulePermission('cms', 'edit'), async (req, res) => {
   try {
     const testimonial = await Testimonial.findById(req.params.id);
     if (!testimonial) {
@@ -596,7 +616,7 @@ router.put('/testimonials/:id', auth, authorize('super_admin', 'agency_admin'), 
 // @route   DELETE /api/cms/testimonials/:id
 // @desc    Delete testimonial
 // @access  Private
-router.delete('/testimonials/:id', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.delete('/testimonials/:id', auth, checkModulePermission('cms', 'delete'), async (req, res) => {
   try {
     const testimonial = await Testimonial.findById(req.params.id);
     if (!testimonial) {
@@ -615,11 +635,11 @@ router.delete('/testimonials/:id', auth, authorize('super_admin', 'agency_admin'
 
 // @route   GET /api/cms/contact-messages
 // @desc    Get all contact messages
-// @access  Private (Super Admin, Agency Admin)
-router.get('/contact-messages', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+// @access  Private (Dynamic Permissions)
+router.get('/contact-messages', auth, checkModulePermission('contact_messages', 'view'), async (req, res) => {
   try {
     const filter = {};
-    
+
     // Agency admin can only see messages for their agency
     if (req.user.role === 'agency_admin') {
       if (!req.user.agency) {
@@ -627,11 +647,11 @@ router.get('/contact-messages', auth, authorize('super_admin', 'agency_admin'), 
       }
       filter.agency = req.user.agency;
     }
-    
+
     const messages = await ContactMessage.find(filter)
       .populate('agency', 'name logo')
       .sort('-createdAt');
-    
+
     res.json({ messages });
   } catch (error) {
     console.error('Get contact messages error:', error);
@@ -658,7 +678,7 @@ router.post('/contact-messages', [
     if (!agencyId) {
       const defaultAgency = await Agency.findOne({ isActive: true }).sort({ createdAt: 1 });
       if (!defaultAgency) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: 'No active agency found. Please contact the administrator.',
           code: 'NO_AGENCY_AVAILABLE'
         });
@@ -676,11 +696,31 @@ router.post('/contact-messages', [
     });
 
     await contactMessage.save();
-    
+
     const populatedMessage = await ContactMessage.findById(contactMessage._id)
       .populate('agency', 'name logo');
-    
-    res.status(201).json({ 
+
+    // Send notifications to Admins
+    try {
+      const agency = await Agency.findById(agencyId);
+
+      // Get all recipients: Super Admins + Agency Admins for this agency
+      const superAdmins = await User.find({ role: 'super_admin', isActive: true });
+      const agencyAdmins = await User.find({ role: 'agency_admin', agency: agencyId, isActive: true });
+
+      const recipientEmails = new Set();
+      superAdmins.forEach(u => recipientEmails.add(u.email));
+      agencyAdmins.forEach(u => recipientEmails.add(u.email));
+
+      const recipientsArray = Array.from(recipientEmails).filter(Boolean);
+      if (recipientsArray.length > 0) {
+        await emailService.sendContactMessageNotification(populatedMessage, agency, recipientsArray);
+      }
+    } catch (notifError) {
+      console.error('Error sending contact message notifications:', notifError);
+    }
+
+    res.status(201).json({
       message: 'Contact message submitted successfully',
       contactMessage: populatedMessage
     });
@@ -692,8 +732,8 @@ router.post('/contact-messages', [
 
 // @route   DELETE /api/cms/contact-messages/:id
 // @desc    Delete contact message
-// @access  Private (Super Admin, Agency Admin)
-router.delete('/contact-messages/:id', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+// @access  Private (Dynamic Permissions)
+router.delete('/contact-messages/:id', auth, checkModulePermission('contact_messages', 'delete'), async (req, res) => {
   try {
     const contactMessage = await ContactMessage.findById(req.params.id);
     if (!contactMessage) {
@@ -719,8 +759,8 @@ router.delete('/contact-messages/:id', auth, authorize('super_admin', 'agency_ad
 
 // @route   PUT /api/cms/contact-messages/:id/read
 // @desc    Mark contact message as read
-// @access  Private (Super Admin, Agency Admin)
-router.put('/contact-messages/:id/read', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+// @access  Private (Dynamic Permissions)
+router.put('/contact-messages/:id/read', auth, checkModulePermission('contact_messages', 'edit'), async (req, res) => {
   try {
     const contactMessage = await ContactMessage.findById(req.params.id);
     if (!contactMessage) {
@@ -775,7 +815,7 @@ router.get('/footer', async (req, res) => {
 // @route   POST /api/cms/footer
 // @desc    Create footer data
 // @access  Private (Super Admin only)
-router.post('/footer', auth, authorize('super_admin'), async (req, res) => {
+router.post('/footer', auth, checkModulePermission('cms', 'create'), async (req, res) => {
   try {
     // Check if footer already exists
     const existingFooter = await Footer.findOne();
@@ -795,7 +835,7 @@ router.post('/footer', auth, authorize('super_admin'), async (req, res) => {
 // @route   PUT /api/cms/footer/:id
 // @desc    Update footer data
 // @access  Private (Super Admin only)
-router.put('/footer/:id', auth, authorize('super_admin'), async (req, res) => {
+router.put('/footer/:id', auth, checkModulePermission('cms', 'edit'), async (req, res) => {
   try {
     const footer = await Footer.findById(req.params.id);
     if (!footer) {
@@ -807,6 +847,104 @@ router.put('/footer/:id', auth, authorize('super_admin'), async (req, res) => {
     res.json({ footer });
   } catch (error) {
     console.error('Update footer error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/cms/contact-messages/:id/entry-permissions
+// @desc    Update entry-specific permissions for a contact message
+// @access  Private (Super Admin)
+router.put('/contact-messages/:id/entry-permissions', auth, authorize('super_admin'), async (req, res) => {
+  try {
+    const { entryPermissions } = req.body;
+
+    if (!entryPermissions) {
+      return res.status(400).json({ message: 'entryPermissions is required' });
+    }
+
+    const contactMessage = await ContactMessage.findByIdAndUpdate(
+      req.params.id,
+      { $set: { entryPermissions } },
+      { new: true, runValidators: true }
+    );
+
+    if (!contactMessage) {
+      return res.status(404).json({ message: 'Contact message not found' });
+    }
+
+    res.json(contactMessage);
+  } catch (error) {
+    console.error('Update entry permissions error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// ==================== SCRIPTS ====================
+
+// @route   GET /api/cms/scripts
+// @desc    Get all scripts (admin)
+// @access  Private (CMS View)
+router.get('/scripts', auth, checkModulePermission('cms', 'view'), async (req, res) => {
+  try {
+    const scripts = await Script.find().sort({ createdAt: -1 });
+    res.json({ scripts });
+  } catch (error) {
+    console.error('Get scripts error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   GET /api/cms/scripts/active
+// @desc    Get all active scripts (public)
+// @access  Public
+router.get('/scripts/active', async (req, res) => {
+  try {
+    const scripts = await Script.find({ isActive: true });
+    res.json({ scripts });
+  } catch (error) {
+    console.error('Get active scripts error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   POST /api/cms/scripts
+// @desc    Create a script
+// @access  Private (CMS Create)
+router.post('/scripts', auth, checkModulePermission('cms', 'create'), async (req, res) => {
+  try {
+    const script = new Script(req.body);
+    await script.save();
+    res.status(201).json({ script });
+  } catch (error) {
+    console.error('Create script error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/cms/scripts/:id
+// @desc    Update a script
+// @access  Private (CMS Edit)
+router.put('/scripts/:id', auth, checkModulePermission('cms', 'edit'), async (req, res) => {
+  try {
+    const script = await Script.findByIdAndUpdate(req.params.id, req.body, { new: true });
+    if (!script) return res.status(404).json({ message: 'Script not found' });
+    res.json({ script });
+  } catch (error) {
+    console.error('Update script error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   DELETE /api/cms/scripts/:id
+// @desc    Delete a script
+// @access  Private (CMS Delete)
+router.delete('/scripts/:id', auth, checkModulePermission('cms', 'delete'), async (req, res) => {
+  try {
+    const script = await Script.findByIdAndDelete(req.params.id);
+    if (!script) return res.status(404).json({ message: 'Script not found' });
+    res.json({ message: 'Script deleted successfully' });
+  } catch (error) {
+    console.error('Delete script error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

@@ -30,22 +30,22 @@ class LeadScoringService {
     // 2. Budget Score (0-25 points)
     if (lead.inquiry?.budget) {
       // Convert to numbers and handle edge cases
-      const min = typeof lead.inquiry.budget.min === 'number' 
-        ? lead.inquiry.budget.min 
+      const min = typeof lead.inquiry.budget.min === 'number'
+        ? lead.inquiry.budget.min
         : (lead.inquiry.budget.min ? parseFloat(lead.inquiry.budget.min) : null);
-      const max = typeof lead.inquiry.budget.max === 'number' 
-        ? lead.inquiry.budget.max 
+      const max = typeof lead.inquiry.budget.max === 'number'
+        ? lead.inquiry.budget.max
         : (lead.inquiry.budget.max ? parseFloat(lead.inquiry.budget.max) : null);
-      
+
       // Only calculate if at least one valid number exists
       if (min !== null && !isNaN(min) && min > 0) {
         let budgetValue = min;
-        
+
         // If both min and max exist, use average
         if (max !== null && !isNaN(max) && max > 0) {
           budgetValue = (min + max) / 2;
         }
-        
+
         // Higher budget = higher score (up to 25 points)
         if (budgetValue >= 1000000) details.budgetScore = 25;
         else if (budgetValue >= 500000) details.budgetScore = 20;
@@ -110,10 +110,10 @@ class LeadScoringService {
    * Determine priority based on score
    */
   getPriorityFromScore(score) {
-    if (score >= 70) return 'hot';
-    if (score >= 40) return 'warm';
-    if (score >= 20) return 'cold';
-    return 'not_interested';
+    if (score >= 70) return 'Hot';
+    if (score >= 40) return 'Warm';
+    if (score >= 20) return 'Cold';
+    return 'Not_interested';
   }
 
   /**
@@ -131,9 +131,9 @@ class LeadScoringService {
 
       lead.score = score;
       lead.scoreDetails = details;
-      
-      // Auto-update priority if enabled (only if not manually set to 'not_interested')
-      if (lead.priority !== 'not_interested' || priority === 'hot') {
+
+      // Auto-update priority if enabled (only if not manually set to 'Not_interested')
+      if (lead.priority !== 'Not_interested' || priority === 'Hot') {
         lead.priority = priority;
       }
 

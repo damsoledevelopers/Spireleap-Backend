@@ -358,7 +358,24 @@ const leadSchema = new mongoose.Schema({
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User'
     }
-  }]
+  }],
+  entryPermissions: {
+    agency_admin: {
+      view: { type: Boolean, default: true },
+      edit: { type: Boolean, default: true },
+      delete: { type: Boolean, default: false }
+    },
+    agent: {
+      view: { type: Boolean, default: true },
+      edit: { type: Boolean, default: true },
+      delete: { type: Boolean, default: false }
+    },
+    staff: {
+      view: { type: Boolean, default: true },
+      edit: { type: Boolean, default: true },
+      delete: { type: Boolean, default: false }
+    }
+  }
 }, {
   timestamps: true
 });

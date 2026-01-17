@@ -5,7 +5,7 @@ const Lead = require('../models/Lead');
 const Property = require('../models/Property');
 const User = require('../models/User');
 const Agency = require('../models/Agency');
-const { auth, authorize, optionalAuth } = require('../middleware/auth');
+const { auth, authorize, optionalAuth, checkModulePermission } = require('../middleware/auth');
 const emailService = require('../services/emailService');
 const smsService = require('../services/smsService');
 const leadAssignmentService = require('../services/leadAssignmentService');
@@ -14,6 +14,9 @@ const webhookService = require('../services/webhookService');
 const encryptionService = require('../services/encryptionService');
 
 const router = express.Router();
+
+const activeStatuses = ['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation'];
+
 
 // Helper function to normalize lead priority
 const getNormalizedPriority = (priority) => {
@@ -75,7 +78,7 @@ const normalizeLeadData = (lead) => {
 // @route   GET /api/leads
 // @desc    Get all leads
 // @access  Private
-router.get('/', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), [
+router.get('/', auth, checkModulePermission('leads', 'view'), [
   query('page').optional().isInt({ min: 1 }),
   query('limit').optional().isInt({ min: 1, max: 500 }),
   query('status').optional().isIn(['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation', 'booked', 'lost', 'closed', 'junk']),
@@ -110,24 +113,36 @@ router.get('/', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff')
       });
     } else {
       // Role-based filtering (only if not filtering by unassigned)
+      // STRICT ISOLATION: Users can ONLY see leads from their own agency
+      const userAgencyId = req.user.agency && mongoose.Types.ObjectId.isValid(req.user.agency)
+        ? new mongoose.Types.ObjectId(req.user.agency)
+        : req.user.agency;
+
       if (req.user.role === 'agency_admin') {
-        filter.agency = req.user.agency;
-        // If user is team lead, show only their team's leads
-        if (req.user.isTeamLead && req.user.team) {
-          filter.team = req.user.team;
-        }
+        // Agency admin visibility: ONLY leads from their agency
+        filter.agency = userAgencyId;
+        // Entry permissions are respected but cannot override agency restriction
+        filter[`entryPermissions.agency_admin.view`] = { $ne: false };
       } else if (req.user.role === 'agent') {
-        // Ensure proper ObjectId conversion for agent filtering
-        if (mongoose.Types.ObjectId.isValid(req.user.id)) {
-          filter.assignedAgent = new mongoose.Types.ObjectId(req.user.id);
-        } else {
-          filter.assignedAgent = req.user.id;
-        }
-        console.log(`🔍 Agent ${req.user.id} filtering leads by assignedAgent:`, filter.assignedAgent);
+        const agentId = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
+        const agentProperties = await Property.find({ agent: agentId }).distinct('_id');
+
+        // Agent visibility: ONLY assigned leads from their agency
+        filter.agency = userAgencyId;
+        filter.$or = [
+          { assignedAgent: agentId },
+          { property: { $in: agentProperties } }
+        ];
+        // Entry permissions are respected but cannot override agency/assignment restriction
+        filter[`entryPermissions.agent.view`] = { $ne: false };
+
+        console.log(`🔍 Agent ${req.user.id} filtering leads - strict agency isolation`);
+      } else if (req.user.role === 'staff') {
+        // Staff has global access logic same as Super Admin, so we do nothing here (falls through)
       }
 
-      // Handle agency filter from query parameter (for super_admin only)
-      if (req.query.agency && req.user.role === 'super_admin') {
+      // Handle agency filter from query parameter (for super_admin and staff)
+      if (req.query.agency && (req.user.role === 'super_admin' || req.user.role === 'staff')) {
         if (mongoose.Types.ObjectId.isValid(req.query.agency)) {
           filter.agency = new mongoose.Types.ObjectId(req.query.agency);
         }
@@ -233,7 +248,14 @@ router.get('/', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff')
     }
 
     const leads = await Lead.find(filter)
-      .populate('property', 'title slug images price location')
+      .populate({
+        path: 'property',
+        select: 'title slug images price location agent',
+        populate: {
+          path: 'agent',
+          select: 'firstName lastName profileImage'
+        }
+      })
       .populate('agency', 'name logo')
       .populate('assignedAgent', 'firstName lastName email profileImage')
       .populate('assignedBy', 'firstName lastName')
@@ -304,16 +326,9 @@ router.get('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
       ? req.user.agency._id.toString()
       : (req.user.agency?.toString() || req.user.agency);
 
-    // Agency admin can only view leads from their agency
-    if (req.user.role === 'agency_admin' && leadAgencyId !== userAgencyId) {
-      return res.status(403).json({ message: 'Access denied' });
-    }
-
-    // Agency admin can view all leads from their agency
-    if (req.user.role === 'agency_admin') {
-      if (leadAgencyId !== userAgencyId) {
-        return res.status(403).json({ message: 'Access denied. You can only view leads from your agency.' });
-      }
+    // Agency admin and staff can only view leads from their agency
+    if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
+      return res.status(403).json({ message: 'Access denied. You can only view leads from your agency.' });
     }
 
     // Agent can view leads assigned to them OR unassigned leads from their agency
@@ -324,12 +339,12 @@ router.get('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
 
       // If lead is assigned to someone else, deny access
       if (assignedAgentId && assignedAgentId !== req.user.id) {
-        return res.status(403).json({ message: 'Access denied' });
+        return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
       }
 
       // If lead is unassigned or assigned to this agent, check agency match
       if (leadAgencyId !== userAgencyId) {
-        return res.status(403).json({ message: 'Access denied' });
+        return res.status(403).json({ message: 'Access denied. This lead is not from your agency.' });
       }
     }
 
@@ -507,26 +522,29 @@ router.post('/', optionalAuth, [
     try {
       const agency = await Agency.findById(agencyId);
 
+      // Get all recipients: Super Admins + Agency Admins for this agency
+      const superAdmins = await User.find({ role: 'super_admin', isActive: true });
+      const agencyAdmins = await User.find({ role: 'agency_admin', agency: agencyId, isActive: true });
+
+      const recipientEmails = new Set();
+      superAdmins.forEach(u => recipientEmails.add(u.email));
+      agencyAdmins.forEach(u => recipientEmails.add(u.email));
+
       if (populatedLead.assignedAgent) {
         const agent = await User.findById(populatedLead.assignedAgent._id);
-        if (agent) {
-          // Send email notification
-          await emailService.sendNewLeadNotification(populatedLead, agent, agency);
+        if (agent && agent.email) {
+          recipientEmails.add(agent.email);
 
           // Send SMS notification if enabled
           if (agency?.settings?.smsNotifications) {
             await smsService.sendLeadNotification(populatedLead, agent);
           }
         }
-      } else {
-        // Notify agency admin if no agent assigned
-        const agencyAdmin = await User.findOne({
-          role: 'agency_admin',
-          agency: agencyId
-        });
-        if (agencyAdmin) {
-          await emailService.sendNewLeadNotification(populatedLead, agencyAdmin, agency);
-        }
+      }
+
+      const recipientsArray = Array.from(recipientEmails).filter(Boolean);
+      if (recipientsArray.length > 0) {
+        await emailService.sendBulkLeadNotification(populatedLead, agency, recipientsArray);
       }
     } catch (notifError) {
       console.error('Error sending notifications:', notifError);
@@ -571,7 +589,7 @@ router.post('/', optionalAuth, [
 // @route   PUT /api/leads/:id
 // @desc    Update lead
 // @access  Private
-router.put('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.put('/:id', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
@@ -589,19 +607,32 @@ router.put('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
       ? req.user.agency._id.toString()
       : (req.user.agency?.toString() || req.user.agency);
 
-    // Agency admin can only update leads from their agency
-    if (req.user.role === 'agency_admin' && leadAgencyId !== userAgencyId) {
-      return res.status(403).json({ message: 'Access denied' });
-    }
+    // Granular Per-Entry Permission Overrides
+    const granularPerms = lead.entryPermissions?.[req.user.role];
+    if (granularPerms && granularPerms.edit === true) {
+      // Explicitly allowed by Super Admin override
+    } else if (granularPerms && granularPerms.edit === false) {
+      return res.status(403).json({ message: 'Access denied by per-entry restriction' });
+    } else {
+      // Legacy/Fallback Logic:
+      // Agency admin and staff can only update leads from their agency
+      if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
+        return res.status(403).json({ message: 'Access denied. You can only update leads from your agency.' });
+      }
 
-    // Agent can only update leads assigned to them
-    if (req.user.role === 'agent') {
-      const assignedAgentId = lead.assignedAgent?._id
-        ? lead.assignedAgent._id.toString()
-        : (lead.assignedAgent?.toString() || lead.assignedAgent);
+      // Agent can only update leads assigned to them or managed properties (fallback)
+      if (req.user.role === 'agent') {
+        const agentId = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
+        const assignedAgentId = lead.assignedAgent?._id
+          ? lead.assignedAgent._id.toString()
+          : (lead.assignedAgent?.toString() || lead.assignedAgent);
 
-      if (assignedAgentId !== req.user.id) {
-        return res.status(403).json({ message: 'Access denied' });
+        // Check assigned agent or property ownership (re-using property check)
+        const isPropertyManager = await Property.exists({ _id: lead.property, agent: agentId });
+
+        if (assignedAgentId !== req.user.id && !isPropertyManager) {
+          return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+        }
       }
     }
 
@@ -699,6 +730,29 @@ router.put('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
       leadObj.contact = encryptionService.decryptLeadContact(leadObj.contact);
     }
 
+    // Send assignment notification if agent changed (background task)
+    const newAssignedAgentId = updatedLead.assignedAgent?._id?.toString() || updatedLead.assignedAgent?.toString();
+    const oldAssignedAgentId = previousAssignedAgent?._id?.toString() || previousAssignedAgent?.toString();
+
+    if (newAssignedAgentId && newAssignedAgentId !== oldAssignedAgentId) {
+      setImmediate(async () => {
+        try {
+          const [agent, agency] = await Promise.all([
+            User.findById(newAssignedAgentId).select('firstName lastName email team'),
+            Agency.findById(updatedLead.agency?._id || updatedLead.agency).select('name settings')
+          ]);
+
+          if (agent && agency) {
+            emailService.sendLeadAssignmentNotification(leadObj, agent, agency).catch(err => {
+              console.error('Error sending email notification:', err);
+            });
+          }
+        } catch (notifError) {
+          console.error('Error sending assignment notification on update:', notifError);
+        }
+      });
+    }
+
     // Send webhook for lead update
     if (webhookService.isEnabled()) {
       try {
@@ -767,6 +821,35 @@ router.post('/:id/notes', auth, authorize('super_admin', 'agency_admin', 'agent'
       return res.status(404).json({ message: 'Lead not found' });
     }
 
+    // Check permissions - same as GET route
+    const leadAgencyId = lead.agency?._id
+      ? lead.agency._id.toString()
+      : (lead.agency?.toString() || lead.agency);
+
+    const userAgencyId = req.user.agency?._id
+      ? req.user.agency._id.toString()
+      : (req.user.agency?.toString() || req.user.agency);
+
+    // Agency admin and staff can only add notes to leads from their agency
+    if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
+      return res.status(403).json({ message: 'Access denied. You can only add notes to leads from your agency.' });
+    }
+
+    // Agent can only add notes to leads assigned to them
+    if (req.user.role === 'agent') {
+      const assignedAgentId = lead.assignedAgent?._id
+        ? lead.assignedAgent._id.toString()
+        : (lead.assignedAgent?.toString() || lead.assignedAgent);
+
+      if (assignedAgentId && assignedAgentId !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+      }
+
+      if (leadAgencyId !== userAgencyId) {
+        return res.status(403).json({ message: 'Access denied. This lead is not from your agency.' });
+      }
+    }
+
     // Normalize priority before saving
     normalizeLeadData(lead);
 
@@ -794,6 +877,35 @@ router.post('/:id/communications', auth, authorize('super_admin', 'agency_admin'
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    // Check permissions - same as GET route
+    const leadAgencyId = lead.agency?._id
+      ? lead.agency._id.toString()
+      : (lead.agency?.toString() || lead.agency);
+
+    const userAgencyId = req.user.agency?._id
+      ? req.user.agency._id.toString()
+      : (req.user.agency?.toString() || req.user.agency);
+
+    // Agency admin and staff can only add communications to leads from their agency
+    if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
+      return res.status(403).json({ message: 'Access denied. You can only add communications to leads from your agency.' });
+    }
+
+    // Agent can only add communications to leads assigned to them
+    if (req.user.role === 'agent') {
+      const assignedAgentId = lead.assignedAgent?._id
+        ? lead.assignedAgent._id.toString()
+        : (lead.assignedAgent?.toString() || lead.assignedAgent);
+
+      if (assignedAgentId && assignedAgentId !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+      }
+
+      if (leadAgencyId !== userAgencyId) {
+        return res.status(403).json({ message: 'Access denied. This lead is not from your agency.' });
+      }
     }
 
     // Normalize priority before saving
@@ -871,17 +983,23 @@ router.post('/:id/tasks', auth, authorize('super_admin', 'agency_admin', 'agent'
       ? req.user.agency._id.toString()
       : (req.user.agency?.toString() || req.user.agency);
 
-    if (req.user.role === 'agency_admin' && leadAgencyId !== userAgencyId) {
-      return res.status(403).json({ message: 'Access denied' });
+    // Agency admin and staff can only add tasks to leads from their agency
+    if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
+      return res.status(403).json({ message: 'Access denied. You can only add tasks to leads from your agency.' });
     }
 
+    // Agent can only add tasks to leads assigned to them
     if (req.user.role === 'agent') {
       const assignedAgentId = lead.assignedAgent?._id
         ? lead.assignedAgent._id.toString()
         : (lead.assignedAgent?.toString() || lead.assignedAgent);
 
-      if (assignedAgentId !== req.user.id) {
-        return res.status(403).json({ message: 'Access denied' });
+      if (assignedAgentId && assignedAgentId !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+      }
+
+      if (leadAgencyId !== userAgencyId) {
+        return res.status(403).json({ message: 'Access denied. This lead is not from your agency.' });
       }
     }
 
@@ -925,17 +1043,23 @@ router.put('/:id/tasks/:taskId', auth, authorize('super_admin', 'agency_admin', 
       ? req.user.agency._id.toString()
       : (req.user.agency?.toString() || req.user.agency);
 
-    if (req.user.role === 'agency_admin' && leadAgencyId !== userAgencyId) {
-      return res.status(403).json({ message: 'Access denied' });
+    // Agency admin and staff can only update tasks on leads from their agency
+    if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
+      return res.status(403).json({ message: 'Access denied. You can only update tasks on leads from your agency.' });
     }
 
+    // Agent can only update tasks on leads assigned to them
     if (req.user.role === 'agent') {
       const assignedAgentId = lead.assignedAgent?._id
         ? lead.assignedAgent._id.toString()
         : (lead.assignedAgent?.toString() || lead.assignedAgent);
 
-      if (assignedAgentId !== req.user.id) {
-        return res.status(403).json({ message: 'Access denied' });
+      if (assignedAgentId && assignedAgentId !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+      }
+
+      if (leadAgencyId !== userAgencyId) {
+        return res.status(403).json({ message: 'Access denied. This lead is not from your agency.' });
       }
     }
 
@@ -990,17 +1114,23 @@ router.delete('/:id/tasks/:taskId', auth, authorize('super_admin', 'agency_admin
       ? req.user.agency._id.toString()
       : (req.user.agency?.toString() || req.user.agency);
 
-    if (req.user.role === 'agency_admin' && leadAgencyId !== userAgencyId) {
-      return res.status(403).json({ message: 'Access denied' });
+    // Agency admin and staff can only delete tasks on leads from their agency
+    if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
+      return res.status(403).json({ message: 'Access denied. You can only delete tasks on leads from your agency.' });
     }
 
+    // Agent can only delete tasks on leads assigned to them
     if (req.user.role === 'agent') {
       const assignedAgentId = lead.assignedAgent?._id
         ? lead.assignedAgent._id.toString()
         : (lead.assignedAgent?.toString() || lead.assignedAgent);
 
-      if (assignedAgentId !== req.user.id) {
-        return res.status(403).json({ message: 'Access denied' });
+      if (assignedAgentId && assignedAgentId !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+      }
+
+      if (leadAgencyId !== userAgencyId) {
+        return res.status(403).json({ message: 'Access denied. This lead is not from your agency.' });
       }
     }
 
@@ -1045,17 +1175,23 @@ router.post('/:id/reminders', auth, authorize('super_admin', 'agency_admin', 'ag
       ? req.user.agency._id.toString()
       : (req.user.agency?.toString() || req.user.agency);
 
-    if (req.user.role === 'agency_admin' && leadAgencyId !== userAgencyId) {
-      return res.status(403).json({ message: 'Access denied' });
+    // Agency admin and staff can only add reminders to leads from their agency
+    if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
+      return res.status(403).json({ message: 'Access denied. You can only add reminders to leads from your agency.' });
     }
 
+    // Agent can only add reminders to leads assigned to them
     if (req.user.role === 'agent') {
       const assignedAgentId = lead.assignedAgent?._id
         ? lead.assignedAgent._id.toString()
         : (lead.assignedAgent?.toString() || lead.assignedAgent);
 
-      if (assignedAgentId !== req.user.id) {
-        return res.status(403).json({ message: 'Access denied' });
+      if (assignedAgentId && assignedAgentId !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+      }
+
+      if (leadAgencyId !== userAgencyId) {
+        return res.status(403).json({ message: 'Access denied. This lead is not from your agency.' });
       }
     }
 
@@ -1277,18 +1413,15 @@ router.put('/:id/assign', auth, authorize('super_admin', 'agency_admin'), [
       // Send notifications in background
       try {
         if (agent && agency) {
-          const populatedLead = await Lead.findById(lead._id)
-            .populate('property', 'title slug')
-            .populate('agency', 'name');
-
+          // Use the already decrypted leadObj for notifications
           // Send email notification (async, don't wait)
-          emailService.sendLeadAssignmentNotification(populatedLead, agent, agency).catch(err => {
+          emailService.sendLeadAssignmentNotification(leadObj, agent, agency).catch(err => {
             console.error('Error sending email notification:', err);
           });
 
           // Send SMS notification if enabled (async, don't wait)
           if (agency?.settings?.smsNotifications) {
-            smsService.sendLeadAssignmentNotification(populatedLead, agent).catch(err => {
+            smsService.sendLeadAssignmentNotification(leadObj, agent).catch(err => {
               console.error('Error sending SMS notification:', err);
             });
           }
@@ -1416,25 +1549,30 @@ router.post('/:id/auto-assign', auth, authorize('super_admin', 'agency_admin'), 
       console.error('Error recalculating lead score:', scoreError);
     }
 
-    // Send notifications
-    try {
-      const populatedAgent = await User.findById(assignedAgentId);
-      const agency = await Agency.findById(agencyId);
-      if (populatedAgent && agency) {
-        await emailService.sendLeadAssignmentNotification(lead, populatedAgent, agency);
-      }
-    } catch (notifError) {
-      console.error('Error sending assignment notifications:', notifError);
-    }
-
     const updatedLead = await Lead.findById(lead._id)
       .populate('assignedAgent', 'firstName lastName')
+      .populate('property', 'title slug')
       .populate('agency', 'name');
 
     const leadObj = updatedLead.toObject();
     if (leadObj.contact) {
       leadObj.contact = encryptionService.decryptLeadContact(leadObj.contact);
     }
+
+    // Send notifications in background
+    setImmediate(async () => {
+      try {
+        const [populatedAgent, populatedAgency] = await Promise.all([
+          User.findById(assignedAgentId),
+          Agency.findById(agencyId)
+        ]);
+        if (populatedAgent && populatedAgency) {
+          await emailService.sendLeadAssignmentNotification(leadObj, populatedAgent, populatedAgency);
+        }
+      } catch (notifError) {
+        console.error('Error sending assignment notifications:', notifError);
+      }
+    });
 
     res.json({
       lead: leadObj,
@@ -1596,19 +1734,29 @@ router.get('/:id/duplicates', auth, async (req, res) => {
   }
 });
 
-// @route   DELETE /api/leads/:id
-// @desc    Delete lead
-// @access  Private (Agency Admin, Super Admin)
-router.delete('/:id', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.delete('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found' });
     }
 
-    // Check permissions
-    if (req.user.role === 'agency_admin' && lead.agency.toString() !== req.user.agency) {
-      return res.status(403).json({ message: 'Access denied' });
+    // Granular Per-Entry Permission Overrides
+    const granularPerms = lead.entryPermissions?.[req.user.role];
+    if (granularPerms && granularPerms.delete === true) {
+      // Explicitly allowed by Super Admin override
+    } else if (granularPerms && granularPerms.delete === false) {
+      return res.status(403).json({ message: 'Access denied by per-entry restriction' });
+    } else {
+      // Fallback Logic
+      if (req.user.role === 'agency_admin' && lead.agency.toString() !== req.user.agency) {
+        return res.status(403).json({ message: 'Access denied' });
+      }
+
+      // Staff and Agents don't have global delete permission usually, so we deny if no override
+      if (req.user.role === 'agent' || req.user.role === 'staff') {
+        return res.status(403).json({ message: 'Access denied. You do not have permission to delete this lead.' });
+      }
     }
 
     await Lead.findByIdAndDelete(req.params.id);
@@ -2460,152 +2608,198 @@ router.post('/:id/recurring-followup', auth, authorize('super_admin', 'agency_ad
 });
 
 // @route   GET /api/leads/analytics/dashboard-metrics
-// @desc    Get dashboard metrics with Today and Month breakdown
+// @desc    Get dashboard metrics with filters and breakdown
 // @access  Private
-router.get('/analytics/dashboard-metrics', auth, authorize('super_admin', 'agency_admin', 'agent'), async (req, res) => {
+router.get('/analytics/dashboard-metrics', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
   try {
     const filter = {};
 
-    // Role-based filtering
+    // Role-based filtering with explicit ObjectId casting for aggregation
     if (req.user.role === 'agency_admin') {
-      filter.agency = req.user.agency;
+      filter.agency = mongoose.Types.ObjectId.isValid(req.user.agency) ? new mongoose.Types.ObjectId(req.user.agency) : req.user.agency;
     } else if (req.user.role === 'agent') {
-      filter.assignedAgent = req.user.id;
+      filter.assignedAgent = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
+    } else if (req.user.role === 'staff') {
+      if (req.user.agency) {
+        filter.agency = mongoose.Types.ObjectId.isValid(req.user.agency) ? new mongoose.Types.ObjectId(req.user.agency) : req.user.agency;
+      }
     }
 
-    // Get all leads for this user/agency
-    const allLeads = await Lead.find(filter);
+    // Apply query filters if provided with explicit ObjectId casting for aggregation
+    if (req.query.agency && req.user.role === 'super_admin') {
+      filter.agency = mongoose.Types.ObjectId.isValid(req.query.agency) ? new mongoose.Types.ObjectId(req.query.agency) : req.query.agency;
+    }
+    if (req.query.owner) {
+      filter.assignedAgent = mongoose.Types.ObjectId.isValid(req.query.owner) ? new mongoose.Types.ObjectId(req.query.owner) : req.query.owner;
+    }
+    if (req.query.source) {
+      filter.source = req.query.source;
+    }
+    if (req.query.status) {
+      filter.status = req.query.status;
+    }
+    if (req.query.property) {
+      filter.property = mongoose.Types.ObjectId.isValid(req.query.property) ? new mongoose.Types.ObjectId(req.query.property) : req.query.property;
+    }
+    if (req.query.campaign) {
+      filter.campaignName = new RegExp(req.query.campaign, 'i');
+    }
+    if (req.query.team) {
+      filter.team = req.query.team;
+    }
+    if (req.query.reportingManager) {
+      filter.reportingManager = mongoose.Types.ObjectId.isValid(req.query.reportingManager) ? new mongoose.Types.ObjectId(req.query.reportingManager) : req.query.reportingManager;
+    }
 
-    // Calculate date ranges
+    // Date range filtering (for global metrics)
+    if (req.query.startDate || req.query.endDate) {
+      filter.createdAt = {};
+      if (req.query.startDate) {
+        filter.createdAt.$gte = new Date(req.query.startDate);
+      }
+      if (req.query.endDate) {
+        const endDate = new Date(req.query.endDate);
+        endDate.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = endDate;
+      }
+    }
+
+    // Calculate dates for special metrics
     const now = new Date();
     const startOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 0, 0, 0, 0);
     const endOfToday = new Date(now.getFullYear(), now.getMonth(), now.getDate(), 23, 59, 59, 999);
     const startOfMonth = new Date(now.getFullYear(), now.getMonth(), 1, 0, 0, 0, 0);
-    const endOfMonth = new Date(now.getFullYear(), now.getMonth() + 1, 0, 23, 59, 59, 999);
 
-    // Filter leads by date
-    const leadsToday = allLeads.filter(lead => {
-      const leadDate = new Date(lead.createdAt);
-      return leadDate >= startOfToday && leadDate <= endOfToday;
-    });
-
-    const leadsThisMonth = allLeads.filter(lead => {
-      const leadDate = new Date(lead.createdAt);
-      return leadDate >= startOfMonth && leadDate <= endOfMonth;
-    });
-
-    // Filter leads with follow-ups scheduled for today
-    const todaysFollowUps = allLeads.filter(lead => {
-      if (!lead.followUpDate) return false;
-      const followUpDate = new Date(lead.followUpDate);
-      // Check if follow-up date is today
-      return followUpDate >= startOfToday && followUpDate <= endOfToday;
-    });
-
-    // Calculate today's follow-up analysis
-    const activeStatuses = ['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation'];
-    const todaysFollowUpsActive = todaysFollowUps.filter(l => activeStatuses.includes(l.status));
-    const todaysFollowUpsCompleted = todaysFollowUps.filter(l => l.status === 'booked' || l.status === 'closed');
-    // Pending = active leads that still need follow-up action today
-    const todaysFollowUpsPending = todaysFollowUpsActive.length;
-
-    // Calculate metrics
-    const metrics = {
-      totalLeads: allLeads.length,
-      newLeads: {
-        total: allLeads.filter(l => l.status === 'new').length,
-        today: leadsToday.filter(l => l.status === 'new').length,
-        thisMonth: leadsThisMonth.filter(l => l.status === 'new').length
-      },
-      totalNewLeads: allLeads.filter(l => l.status === 'new').length,
-      newLeadsToday: leadsToday.filter(l => l.status === 'new').length,
-      newLeadsThisMonth: leadsThisMonth.filter(l => l.status === 'new').length,
-      conversionRate: allLeads.length > 0
-        ? ((allLeads.filter(l => l.status === 'booked' || l.status === 'closed').length / allLeads.length) * 100).toFixed(2)
-        : 0,
-      todaysFollowUps: {
-        total: todaysFollowUps.length,
-        active: todaysFollowUpsActive.length,
-        completed: todaysFollowUpsCompleted.length,
-        pending: todaysFollowUpsPending,
-        completionRate: todaysFollowUps.length > 0
-          ? ((todaysFollowUpsCompleted.length / todaysFollowUps.length) * 100).toFixed(1)
-          : 0
-      },
-      leadSourcePerformance: {},
-      salesExecutivePerformance: {}
-    };
-
-    // Source performance
-    allLeads.forEach(lead => {
-      const source = lead.source || 'unknown';
-      if (!metrics.leadSourcePerformance[source]) {
-        metrics.leadSourcePerformance[source] = {
-          total: 0,
-          converted: 0,
-          conversionRate: 0
-        };
-      }
-      metrics.leadSourcePerformance[source].total++;
-      if (lead.status === 'booked' || lead.status === 'closed') {
-        metrics.leadSourcePerformance[source].converted++;
-      }
-    });
-
-    // Calculate conversion rates for sources
-    Object.keys(metrics.leadSourcePerformance).forEach(source => {
-      const sourceData = metrics.leadSourcePerformance[source];
-      sourceData.conversionRate = sourceData.total > 0
-        ? ((sourceData.converted / sourceData.total) * 100).toFixed(2)
-        : 0;
-    });
-
-    // Sales executive performance (if agent role, show only their data)
-    const agentLeadsMap = {};
-    allLeads.forEach(lead => {
-      if (lead.assignedAgent) {
-        const agentId = lead.assignedAgent.toString();
-        if (!agentLeadsMap[agentId]) {
-          agentLeadsMap[agentId] = {
-            agentId: agentId,
-            totalLeads: 0,
-            convertedLeads: 0,
-            conversionRate: 0
-          };
-        }
-        agentLeadsMap[agentId].totalLeads++;
-        if (lead.status === 'booked' || lead.status === 'closed') {
-          agentLeadsMap[agentId].convertedLeads++;
+    // Use aggregation for status-based metrics to reduce DB calls
+    const statsAggregation = await Lead.aggregate([
+      { $match: filter },
+      {
+        $facet: {
+          statusCounts: [
+            { $group: { _id: '$status', count: { $sum: 1 } } }
+          ],
+          sourceCounts: [
+            { $group: { _id: '$source', count: { $sum: 1 } } }
+          ],
+          totalLeads: [{ $count: "count" }]
         }
       }
-    });
+    ]);
 
-    // Calculate conversion rates for agents
-    Object.keys(agentLeadsMap).forEach(agentId => {
-      const agentData = agentLeadsMap[agentId];
-      agentData.conversionRate = agentData.totalLeads > 0
-        ? ((agentData.convertedLeads / agentData.totalLeads) * 100).toFixed(2)
-        : 0;
-    });
+    const stats = statsAggregation[0];
+    const totalLeads = stats.totalLeads[0]?.count || 0;
 
-    metrics.salesExecutivePerformance = Object.values(agentLeadsMap);
+    // Status counts map
+    const countsMap = {};
+    stats.statusCounts.forEach(s => countsMap[s._id] = s.count);
+
+    const convertedLeadsSet = (countsMap['booked'] || 0) + (countsMap['closed'] || 0);
+    const conversionRate = totalLeads > 0 ? ((convertedLeadsSet / totalLeads) * 100).toFixed(2) : 0;
+
+    // Get New Leads Today & This Month (ignores query date filter but respects other filters)
+    const baseFilterWithoutDates = { ...filter };
+    delete baseFilterWithoutDates.createdAt;
+
+    const timeMetrics = await Lead.aggregate([
+      { $match: baseFilterWithoutDates },
+      {
+        $facet: {
+          newToday: [
+            { $match: { createdAt: { $gte: startOfToday, $lte: endOfToday } } },
+            { $count: "count" }
+          ],
+          newThisMonth: [
+            { $match: { createdAt: { $gte: startOfMonth } } },
+            { $count: "count" }
+          ],
+          todaysFollowUps: [
+            { $match: { followUpDate: { $gte: startOfToday, $lte: endOfToday } } },
+            {
+              $group: {
+                _id: null,
+                total: { $sum: 1 },
+                completed: {
+                  $sum: {
+                    $cond: [{ $in: ['$status', ['booked', 'closed', 'site_visit_completed']] }, 1, 0]
+                  }
+                },
+                pending: {
+                  $sum: {
+                    $cond: [{ $in: ['$status', activeStatuses] }, 1, 0]
+                  }
+                }
+              }
+            }
+          ],
+          missedFollowUps: [
+            {
+              $match: {
+                followUpDate: { $lt: startOfToday },
+                status: { $in: activeStatuses }
+              }
+            },
+            { $count: "count" }
+          ]
+        }
+      }
+    ]);
+
+    const tMetrics = timeMetrics[0];
+    const newLeadsToday = tMetrics.newToday[0]?.count || 0;
+    const newLeadsThisMonth = tMetrics.newThisMonth[0]?.count || 0;
+    const missedFollowUps = tMetrics.missedFollowUps[0]?.count || 0;
+    const followUps = tMetrics.todaysFollowUps[0] || { total: 0, completed: 0, pending: 0 };
 
     res.json({
-      metrics: metrics,
-      dateRanges: {
-        today: {
-          start: startOfToday,
-          end: endOfToday
-        },
-        thisMonth: {
-          start: startOfMonth,
-          end: endOfMonth
+      metrics: {
+        totalLeads,
+        newLeadsToday,
+        newLeadsThisMonth,
+        conversionRate,
+        missedFollowUps,
+        statusCounts: countsMap,
+        todaysFollowUps: {
+          total: followUps.total,
+          completed: followUps.completed,
+          pending: followUps.pending,
+          completionRate: followUps.total > 0
+            ? ((followUps.completed / followUps.total) * 100).toFixed(1)
+            : 0
         }
       }
     });
   } catch (error) {
     console.error('Dashboard metrics error:', error);
-    res.status(500).json({ message: 'Server error' });
+    res.status(500).json({ message: 'Server error', error: error.message });
+  }
+});
+
+// @route   PUT /api/leads/:id/entry-permissions
+// @desc    Update entry-specific permissions for a lead
+// @access  Private (Super Admin)
+router.put('/:id/entry-permissions', auth, authorize('super_admin'), async (req, res) => {
+  try {
+    const { entryPermissions } = req.body;
+
+    // Validate entryPermissions structure
+    if (!entryPermissions) {
+      return res.status(400).json({ message: 'entryPermissions is required' });
+    }
+
+    const lead = await Lead.findByIdAndUpdate(
+      req.params.id,
+      { $set: { entryPermissions } },
+      { new: true, runValidators: true }
+    );
+
+    if (!lead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    res.json(lead);
+  } catch (error) {
+    console.error('Update entry permissions error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 

@@ -120,6 +120,7 @@ app.use('/api/gdpr', require('./routes/gdpr'));
 app.use('/api/backup', require('./routes/backup'));
 app.use('/api/erp', require('./routes/erp'));
 app.use('/api/stats', require('./routes/stats'));
+app.use('/api/permissions', require('./routes/permissions'));
 
 // --------------------
 // Health Check

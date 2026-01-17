@@ -27,10 +27,10 @@ router.get('/export/:leadId', auth, authorize('super_admin', 'agency_admin', 'ag
     }
 
     // Check permissions
-    const leadAgencyId = lead.agency?._id 
-      ? lead.agency._id.toString() 
+    const leadAgencyId = lead.agency?._id
+      ? lead.agency._id.toString()
       : (lead.agency?.toString() || lead.agency);
-    
+
     const userAgencyId = req.user.agency?._id
       ? req.user.agency._id.toString()
       : (req.user.agency?.toString() || req.user.agency);
@@ -125,10 +125,10 @@ router.delete('/delete/:leadId', auth, authorize('super_admin', 'agency_admin'),
     }
 
     // Check permissions
-    const leadAgencyId = lead.agency?._id 
-      ? lead.agency._id.toString() 
+    const leadAgencyId = lead.agency?._id
+      ? lead.agency._id.toString()
       : (lead.agency?.toString() || lead.agency);
-    
+
     const userAgencyId = req.user.agency?._id
       ? req.user.agency._id.toString()
       : (req.user.agency?.toString() || req.user.agency);
@@ -151,9 +151,9 @@ router.delete('/delete/:leadId', auth, authorize('super_admin', 'agency_admin'),
     lead.notes = [];
     lead.communications = [];
     lead.status = 'junk';
-    lead.priority = 'not_interested';
+    lead.priority = 'Not_interested';
     lead.tags = ['GDPR_DELETED'];
-    
+
     // Add deletion metadata
     lead.gdprDeleted = {
       deletedAt: new Date(),

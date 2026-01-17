@@ -3,14 +3,17 @@ const { body, validationResult } = require('express-validator');
 const mongoose = require('mongoose');
 const Agency = require('../models/Agency');
 const User = require('../models/User');
-const { auth, authorize } = require('../middleware/auth');
+const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
 // @route   GET /api/agencies
 // @desc    Get all agencies
-// @access  Private (Super Admin, Agency Admin)
-router.get('/', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+// @access  Private (Super Admin, Agency Admin, Staff)
+router.get('/', auth, (req, res, next) => {
+  if (req.user.role === 'staff') return next();
+  return checkModulePermission('agencies', 'view')(req, res, next);
+}, async (req, res) => {
   try {
     const filter = {};
     if (req.user.role === 'agency_admin') {
@@ -45,7 +48,7 @@ router.get('/', auth, authorize('super_admin', 'agency_admin'), async (req, res)
 
     const total = await Agency.countDocuments(filter);
 
-    res.json({ 
+    res.json({
       agencies,
       pagination: {
         page,
@@ -63,7 +66,7 @@ router.get('/', auth, authorize('super_admin', 'agency_admin'), async (req, res)
 // @route   GET /api/agencies/:id
 // @desc    Get single agency
 // @access  Private
-router.get('/:id', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.get('/:id', auth, checkModulePermission('agencies', 'view'), async (req, res) => {
   try {
     const agency = await Agency.findById(req.params.id)
       .populate('owner', 'firstName lastName email phone');
@@ -87,7 +90,7 @@ router.get('/:id', auth, authorize('super_admin', 'agency_admin'), async (req, r
 // @route   POST /api/agencies
 // @desc    Create new agency and agency admin user
 // @access  Private (Super Admin only)
-router.post('/', auth, authorize('super_admin'), [
+router.post('/', auth, checkModulePermission('agencies', 'create'), [
   body('name').trim().notEmpty().withMessage('Agency name is required'),
   body('contact.email').isEmail().withMessage('Valid email is required'),
   body('contact.phone').notEmpty().withMessage('Phone is required'),
@@ -96,15 +99,15 @@ router.post('/', auth, authorize('super_admin'), [
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'Validation failed',
-        errors: errors.array() 
+        errors: errors.array()
       });
     }
 
     // Ensure owner is set - use current user if not provided
     if (!req.user || !req.user.id) {
-      return res.status(401).json({ 
+      return res.status(401).json({
         message: 'User not authenticated',
         errors: [{ msg: 'Authentication required' }]
       });
@@ -113,7 +116,7 @@ router.post('/', auth, authorize('super_admin'), [
     // Check if user with agency email already exists
     const existingUser = await User.findOne({ email: req.body.contact.email });
     if (existingUser) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'User already exists with this email',
         errors: [{ msg: 'Please use a different email address' }]
       });
@@ -123,7 +126,7 @@ router.post('/', auth, authorize('super_admin'), [
     const agencyData = {
       ...req.body
     };
-    
+
     // Remove password from agency data (we'll use it separately)
     const password = agencyData.password;
     delete agencyData.password;
@@ -133,7 +136,7 @@ router.post('/', auth, authorize('super_admin'), [
 
     // Ensure owner is a valid ObjectId
     if (!mongoose.Types.ObjectId.isValid(agencyData.owner)) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'Invalid owner ID',
         errors: [{ msg: 'Owner must be a valid user ID' }]
       });
@@ -176,7 +179,7 @@ router.post('/', auth, authorize('super_admin'), [
         console.error('Error creating agency admin user:', userError);
         // If user creation fails, delete the agency
         await Agency.findByIdAndDelete(agency._id);
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: 'Failed to create agency admin account',
           errors: [{ msg: userError.message || 'User creation failed' }]
         });
@@ -186,9 +189,9 @@ router.post('/', auth, authorize('super_admin'), [
     const populatedAgency = await Agency.findById(agency._id)
       .populate('owner', 'firstName lastName email');
 
-    res.status(201).json({ 
+    res.status(201).json({
       agency: populatedAgency,
-      message: password 
+      message: password
         ? 'Agency and agency admin account created successfully. The admin can now login with the provided email and password.'
         : 'Agency created successfully'
     });
@@ -199,18 +202,18 @@ router.post('/', auth, authorize('super_admin'), [
         msg: err.message,
         param: err.path
       }));
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'Agency validation failed',
         errors: validationErrors
       });
     }
     if (error.code === 11000) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'Agency with this slug already exists',
         errors: [{ msg: 'Slug must be unique' }]
       });
     }
-    res.status(500).json({ 
+    res.status(500).json({
       message: error.message || 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
@@ -220,7 +223,7 @@ router.post('/', auth, authorize('super_admin'), [
 // @route   PUT /api/agencies/:id
 // @desc    Update agency
 // @access  Private
-router.put('/:id', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.put('/:id', auth, checkModulePermission('agencies', 'edit'), async (req, res) => {
   try {
     const agency = await Agency.findById(req.params.id);
     if (!agency) {
@@ -245,14 +248,14 @@ router.put('/:id', auth, authorize('super_admin', 'agency_admin'), async (req, r
     if (password) {
       // Validate password length
       if (password.length < 6) {
-        return res.status(400).json({ 
+        return res.status(400).json({
           message: 'Password must be at least 6 characters',
           errors: [{ msg: 'Password must be at least 6 characters' }]
         });
       }
 
       // Find the agency admin user by email
-      const agencyAdmin = await User.findOne({ 
+      const agencyAdmin = await User.findOne({
         email: agency.contact.email,
         role: 'agency_admin',
         agency: agency._id
@@ -286,9 +289,9 @@ router.put('/:id', auth, authorize('super_admin', 'agency_admin'), async (req, r
     const updatedAgency = await Agency.findById(agency._id)
       .populate('owner', 'firstName lastName email');
 
-    res.json({ 
+    res.json({
       agency: updatedAgency,
-      message: password 
+      message: password
         ? 'Agency updated successfully. Agency admin password has been reset.'
         : 'Agency updated successfully'
     });
@@ -299,7 +302,7 @@ router.put('/:id', auth, authorize('super_admin', 'agency_admin'), async (req, r
         msg: err.message,
         param: err.path
       }));
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'Agency validation failed',
         errors: validationErrors
       });
@@ -311,7 +314,7 @@ router.put('/:id', auth, authorize('super_admin', 'agency_admin'), async (req, r
 // @route   GET /api/agencies/:id/stats
 // @desc    Get agency statistics
 // @access  Private
-router.get('/:id/stats', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.get('/:id/stats', auth, checkModulePermission('agencies', 'view'), async (req, res) => {
   try {
     const agency = await Agency.findById(req.params.id);
     if (!agency) {
@@ -350,7 +353,7 @@ router.get('/:id/stats', auth, authorize('super_admin', 'agency_admin'), async (
 // @route   DELETE /api/agencies/:id
 // @desc    Delete agency
 // @access  Private (Super Admin, Agency Admin - own agency only)
-router.delete('/:id', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.delete('/:id', auth, checkModulePermission('agencies', 'delete'), async (req, res) => {
   try {
     const agency = await Agency.findById(req.params.id);
     if (!agency) {

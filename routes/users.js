@@ -2,7 +2,9 @@ const express = require('express');
 const { body, validationResult, param } = require('express-validator');
 const mongoose = require('mongoose');
 const User = require('../models/User');
-const { auth, authorize } = require('../middleware/auth');
+const { auth, authorize, checkModulePermission } = require('../middleware/auth');
+const emailService = require('../services/emailService');
+const Agency = require('../models/Agency');
 
 const router = express.Router();
 
@@ -83,6 +85,19 @@ router.post('/', [
     const userResponse = user.toObject();
     delete userResponse.password;
 
+    // Send welcome email with credentials in background
+    setImmediate(async () => {
+      try {
+        const agencyData = user.agency ? await Agency.findById(user.agency).select('name') : null;
+        const userWithAgency = user.toObject();
+        userWithAgency.agency = agencyData;
+
+        await emailService.sendAccountCreatedNotification(userWithAgency, password);
+      } catch (emailError) {
+        console.error('Error sending account creation email:', emailError);
+      }
+    });
+
     res.status(201).json({
       message: 'User created successfully',
       user: userResponse
@@ -98,7 +113,7 @@ router.post('/', [
 // @access  Private (Super Admin, Agency Admin)
 router.get('/', [
   auth,
-  authorize('super_admin', 'agency_admin')
+  authorize('super_admin', 'agency_admin', 'staff')
 ], async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;
@@ -110,6 +125,9 @@ router.get('/', [
       search,
       isActive,
       agency,
+      department,
+      startDate,
+      endDate,
       sortBy = 'createdAt',
       sortOrder = 'desc'
     } = req.query;
@@ -125,6 +143,24 @@ router.get('/', [
       filter.isActive = isActive === 'true';
     }
 
+    if (department) {
+      filter['staffInfo.department'] = department;
+    }
+
+    // Date range filtering
+    if (startDate || endDate) {
+      filter.createdAt = {};
+      if (startDate) {
+        filter.createdAt.$gte = new Date(startDate);
+      }
+      if (endDate) {
+        // Set to end of day
+        const end = new Date(endDate);
+        end.setHours(23, 59, 59, 999);
+        filter.createdAt.$lte = end;
+      }
+    }
+
     if (search) {
       filter.$or = [
         { firstName: { $regex: search, $options: 'i' } },
@@ -133,8 +169,8 @@ router.get('/', [
       ];
     }
 
-    // Agency filtering - if agency query param is provided, use it (for super_admin)
-    if (agency && req.user.role === 'super_admin') {
+    // Agency filtering - if agency query param is provided, use it (for super_admin and staff)
+    if (agency && (req.user.role === 'super_admin' || req.user.role === 'staff')) {
       if (mongoose.Types.ObjectId.isValid(agency)) {
         filter.agency = new mongoose.Types.ObjectId(agency);
       } else {
@@ -215,6 +251,7 @@ router.get('/stats/overview', [
 // @access  Private
 router.get('/:id', [
   auth,
+  checkModulePermission('users', 'view'),
   param('id').custom((value) => {
     if (!value) {
       throw new Error('User ID is required');
@@ -304,6 +341,7 @@ router.get('/:id', [
 // @access  Private
 router.put('/:id', [
   auth,
+  checkModulePermission('users', 'edit'),
   param('id').custom((value) => {
     if (!value) {
       throw new Error('User ID is required');
@@ -335,6 +373,8 @@ router.put('/:id', [
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
+
+    const oldRole = user.role;
 
     // Check access permissions
     // Get user agency ID (handle both populated object and ID string)
@@ -414,6 +454,20 @@ router.put('/:id', [
         message: 'User updated successfully',
         user: updatedUser
       });
+
+      // Send notifications in background
+      setImmediate(async () => {
+        try {
+          if (updateData.role && updateData.role !== oldRole) {
+            await emailService.sendRoleChangeNotification(updatedUser, oldRole, updateData.role);
+          } else {
+            // If role didn't change, it's a profile update
+            await emailService.sendProfileUpdateNotification(updatedUser);
+          }
+        } catch (emailError) {
+          console.error('Error sending update notification email:', emailError);
+        }
+      });
     } else {
       // No password update, use findByIdAndUpdate for better performance
       const updatedUser = await User.findByIdAndUpdate(
@@ -425,6 +479,20 @@ router.put('/:id', [
       res.json({
         message: 'User updated successfully',
         user: updatedUser
+      });
+
+      // Send notifications in background
+      setImmediate(async () => {
+        try {
+          if (updateData.role && updateData.role !== oldRole) {
+            await emailService.sendRoleChangeNotification(updatedUser, oldRole, updateData.role);
+          } else {
+            // If role didn't change, it's a profile update
+            await emailService.sendProfileUpdateNotification(updatedUser);
+          }
+        } catch (emailError) {
+          console.error('Error sending update notification email:', emailError);
+        }
       });
     }
   } catch (error) {
@@ -442,7 +510,7 @@ router.put('/:id', [
 // @access  Private (Super Admin, Agency Admin)
 router.put('/:id/status', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('users', 'edit'),
   param('id').custom((value) => {
     if (!value) {
       throw new Error('User ID is required');
@@ -505,7 +573,7 @@ router.put('/:id/status', [
 // @access  Private (Super Admin, Agency Admin)
 router.delete('/:id', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('users', 'delete'),
   param('id').custom((value) => {
     if (!value) {
       throw new Error('User ID is required');
@@ -614,6 +682,15 @@ router.put('/:id/password', [
     // Update password
     user.password = newPassword;
     await user.save();
+
+    // Send confirmation email in background
+    setImmediate(async () => {
+      try {
+        await emailService.sendPasswordChangeConfirmation(user);
+      } catch (emailError) {
+        console.error('Error sending password confirmation email:', emailError);
+      }
+    });
 
     res.json({ message: 'Password changed successfully' });
   } catch (error) {

@@ -16,7 +16,7 @@ class EmailService {
   async sendPasswordResetEmail(user, resetToken) {
     try {
       const resetUrl = `${process.env.CLIENT_URL}/auth/reset-password?token=${resetToken}`;
-      
+
       const mailOptions = {
         from: `"SPIRELEAP Real Estate" <${process.env.SMTP_USER}>`,
         to: user.email,
@@ -96,6 +96,96 @@ ${resetUrl}
 This link will expire in 1 hour for security reasons.
 
 If you didn't request this password reset, please ignore this email.
+
+Best regards,
+SPIRELEAP Real Estate Team
+    `;
+  }
+
+  async sendAccountCreatedNotification(user, password) {
+    try {
+      const mailOptions = {
+        from: `"SPIRELEAP Real Estate" <${process.env.SMTP_USER}>`,
+        to: user.email,
+        subject: 'Your SPIRELEAP CRM Account Credentials',
+        html: this.generateAccountCreatedHTML(user, password),
+        text: this.generateAccountCreatedText(user, password)
+      };
+
+      const result = await this.transporter.sendMail(mailOptions);
+      console.log('Account creation email sent:', result.messageId);
+      return result;
+    } catch (error) {
+      console.error('Error sending account creation email:', error);
+      throw error;
+    }
+  }
+
+  generateAccountCreatedHTML(user, password) {
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Account Created - SPIRELEAP CRM</title>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #2c5aa0; color: white; padding: 20px; border-radius: 5px; text-align: center; }
+          .content { padding: 20px; border: 1px solid #ddd; border-top: none; border-radius: 0 0 5px 5px; }
+          .creds { background: #f4f4f4; padding: 15px; border-radius: 5px; margin: 20px 0; }
+          .button { display: inline-block; background: #2c5aa0; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 20px 0; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1 style="margin: 0;">Welcome to SPIRELEAP CRM</h1>
+          </div>
+          <div class="content">
+            <p>Dear ${user.firstName} ${user.lastName},</p>
+            <p>An administrator has created your account on the SPIRELEAP Real Estate CRM.</p>
+            <p><strong>Account Details:</strong></p>
+            <ul>
+              <li><strong>Role:</strong> ${user.role.charAt(0).toUpperCase() + user.role.slice(1)}</li>
+              <li><strong>Agency:</strong> ${user.agency?.name || 'SPIRELEAP'}</li>
+            </ul>
+            <div class="creds">
+              <p style="margin-top: 0;"><strong>Your Login Credentials:</strong></p>
+              <p><strong>Email:</strong> ${user.email}</p>
+              <p><strong>Password:</strong> ${password}</p>
+            </div>
+            <p style="color: #666; font-size: 14px;">Please change your password after your first login for better security.</p>
+            <div style="text-align: center;">
+              <a href="${process.env.CLIENT_URL}/auth/login" class="button">Login Now</a>
+            </div>
+            <p>Best regards,<br>SPIRELEAP Real Estate Team</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
+  generateAccountCreatedText(user, password) {
+    return `
+Welcome to SPIRELEAP Real Estate CRM!
+
+Dear ${user.firstName} ${user.lastName},
+
+An administrator has created your account on the SPIRELEAP Real Estate CRM.
+
+Account Details:
+- Role: ${user.role.charAt(0).toUpperCase() + user.role.slice(1)}
+- Agency: ${user.agency?.name || 'SPIRELEAP'}
+
+Your Login Credentials:
+- Email: ${user.email}
+- Password: ${password}
+
+Please change your password after your first login for better security.
+
+Login here: ${process.env.CLIENT_URL}/auth/login
 
 Best regards,
 SPIRELEAP Real Estate Team
@@ -201,7 +291,7 @@ SPIRELEAP Real Estate Team
   }
 
   generateLeadNotificationHTML(lead, agent, agency) {
-    const propertyInfo = lead.property 
+    const propertyInfo = lead.property
       ? `<p><strong>Property:</strong> ${lead.property.title}</p>`
       : '<p><strong>Type:</strong> General Inquiry</p>';
 
@@ -254,7 +344,7 @@ SPIRELEAP Real Estate Team
 
   generateLeadNotificationText(lead, agent, agency) {
     const propertyInfo = lead.property ? `Property: ${lead.property.title}` : 'Type: General Inquiry';
-    
+
     return `
 New Lead Assigned
 
@@ -526,7 +616,7 @@ ${agency?.name || 'SPIRELEAP'} Team
 
   generateFollowUpReminderHTML(lead, agent, agency) {
     const followUpDate = lead.followUpDate ? new Date(lead.followUpDate).toLocaleDateString() : 'Today';
-    
+
     return `
       <!DOCTYPE html>
       <html>
@@ -572,7 +662,7 @@ ${agency?.name || 'SPIRELEAP'} Team
 
   generateFollowUpReminderText(lead, agent, agency) {
     const followUpDate = lead.followUpDate ? new Date(lead.followUpDate).toLocaleDateString() : 'Today';
-    
+
     return `
 Follow-up Reminder
 
@@ -652,7 +742,7 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateTaskReminderText(lead, agent, agency, tasks) {
-    const tasksList = tasks.map(task => 
+    const tasksList = tasks.map(task =>
       `- ${task.title} (Due: ${new Date(task.dueDate).toLocaleDateString()})`
     ).join('\n');
 
@@ -702,16 +792,16 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateSiteVisitConfirmationHTML(lead, relationshipManager, agency) {
-    const visitDate = lead.siteVisit?.scheduledDate 
-      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', { 
-          weekday: 'long', 
-          year: 'numeric', 
-          month: 'long', 
-          day: 'numeric' 
-        })
+    const visitDate = lead.siteVisit?.scheduledDate
+      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      })
       : 'TBD';
     const visitTime = lead.siteVisit?.scheduledTime || 'TBD';
-    const rmName = relationshipManager 
+    const rmName = relationshipManager
       ? `${relationshipManager.firstName} ${relationshipManager.lastName}`
       : 'Our team';
     const rmPhone = relationshipManager?.phone || '';
@@ -766,16 +856,16 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateSiteVisitConfirmationText(lead, relationshipManager, agency) {
-    const visitDate = lead.siteVisit?.scheduledDate 
-      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', { 
-          weekday: 'long', 
-          year: 'numeric', 
-          month: 'long', 
-          day: 'numeric' 
-        })
+    const visitDate = lead.siteVisit?.scheduledDate
+      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      })
       : 'TBD';
     const visitTime = lead.siteVisit?.scheduledTime || 'TBD';
-    const rmName = relationshipManager 
+    const rmName = relationshipManager
       ? `${relationshipManager.firstName} ${relationshipManager.lastName}`
       : 'Our team';
     const rmPhone = relationshipManager?.phone || '';
@@ -828,13 +918,13 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateSiteVisitAgentNotificationHTML(lead, agent, agency) {
-    const visitDate = lead.siteVisit?.scheduledDate 
-      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', { 
-          weekday: 'long', 
-          year: 'numeric', 
-          month: 'long', 
-          day: 'numeric' 
-        })
+    const visitDate = lead.siteVisit?.scheduledDate
+      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      })
       : 'TBD';
     const visitTime = lead.siteVisit?.scheduledTime || 'TBD';
     const propertyName = lead.property?.title || 'Property';
@@ -902,13 +992,13 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateSiteVisitAgentNotificationText(lead, agent, agency) {
-    const visitDate = lead.siteVisit?.scheduledDate 
-      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', { 
-          weekday: 'long', 
-          year: 'numeric', 
-          month: 'long', 
-          day: 'numeric' 
-        })
+    const visitDate = lead.siteVisit?.scheduledDate
+      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      })
       : 'TBD';
     const visitTime = lead.siteVisit?.scheduledTime || 'TBD';
     const propertyName = lead.property?.title || 'Property';
@@ -965,13 +1055,13 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateSiteVisitReminderHTML(lead, relationshipManager, agency) {
-    const visitDate = lead.siteVisit?.scheduledDate 
-      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', { 
-          weekday: 'long', 
-          year: 'numeric', 
-          month: 'long', 
-          day: 'numeric' 
-        })
+    const visitDate = lead.siteVisit?.scheduledDate
+      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      })
       : 'TBD';
     const visitTime = lead.siteVisit?.scheduledTime || 'TBD';
     const propertyName = lead.property?.title || 'Property';
@@ -1024,13 +1114,13 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateSiteVisitReminderText(lead, relationshipManager, agency) {
-    const visitDate = lead.siteVisit?.scheduledDate 
-      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', { 
-          weekday: 'long', 
-          year: 'numeric', 
-          month: 'long', 
-          day: 'numeric' 
-        })
+    const visitDate = lead.siteVisit?.scheduledDate
+      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      })
       : 'TBD';
     const visitTime = lead.siteVisit?.scheduledTime || 'TBD';
     const propertyName = lead.property?.title || 'Property';
@@ -1081,13 +1171,13 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateFollowUpReminderHTML(lead, agent, agency) {
-    const followUpDate = lead.followUpDate 
-      ? new Date(lead.followUpDate).toLocaleDateString('en-US', { 
-          weekday: 'long', 
-          year: 'numeric', 
-          month: 'long', 
-          day: 'numeric' 
-        })
+    const followUpDate = lead.followUpDate
+      ? new Date(lead.followUpDate).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      })
       : 'TBD';
 
     return `
@@ -1133,7 +1223,7 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateFollowUpReminderText(lead, agent, agency) {
-    const followUpDate = lead.followUpDate 
+    const followUpDate = lead.followUpDate
       ? new Date(lead.followUpDate).toLocaleDateString()
       : 'TBD';
 
@@ -1226,7 +1316,7 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateTaskReminderText(lead, agent, agency, tasks) {
-    const tasksList = tasks.map(task => 
+    const tasksList = tasks.map(task =>
       `- ${task.title} (Due: ${new Date(task.dueDate).toLocaleDateString()}, Status: ${task.status})`
     ).join('\n');
 
@@ -1272,13 +1362,13 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateSiteVisitReminderHTML(lead, relationshipManager, agency) {
-    const visitDate = lead.siteVisit?.scheduledDate 
-      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', { 
-          weekday: 'long', 
-          year: 'numeric', 
-          month: 'long', 
-          day: 'numeric' 
-        })
+    const visitDate = lead.siteVisit?.scheduledDate
+      ? new Date(lead.siteVisit.scheduledDate).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      })
       : 'TBD';
     const visitTime = lead.siteVisit?.scheduledTime || 'TBD';
     const propertyName = lead.property?.title || 'Property';
@@ -1350,13 +1440,13 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateMissedFollowUpAlertHTML(lead, agent, agency, daysOverdue) {
-    const followUpDate = lead.followUpDate 
-      ? new Date(lead.followUpDate).toLocaleDateString('en-US', { 
-          weekday: 'long', 
-          year: 'numeric', 
-          month: 'long', 
-          day: 'numeric' 
-        })
+    const followUpDate = lead.followUpDate
+      ? new Date(lead.followUpDate).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      })
       : 'TBD';
 
     return `
@@ -1410,7 +1500,7 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateMissedFollowUpAlertText(lead, agent, agency, daysOverdue) {
-    const followUpDate = lead.followUpDate 
+    const followUpDate = lead.followUpDate
       ? new Date(lead.followUpDate).toLocaleDateString()
       : 'TBD';
 
@@ -1465,13 +1555,13 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateMissedFollowUpManagerAlertHTML(lead, agent, manager, agency, daysOverdue) {
-    const followUpDate = lead.followUpDate 
-      ? new Date(lead.followUpDate).toLocaleDateString('en-US', { 
-          weekday: 'long', 
-          year: 'numeric', 
-          month: 'long', 
-          day: 'numeric' 
-        })
+    const followUpDate = lead.followUpDate
+      ? new Date(lead.followUpDate).toLocaleDateString('en-US', {
+        weekday: 'long',
+        year: 'numeric',
+        month: 'long',
+        day: 'numeric'
+      })
       : 'TBD';
 
     return `
@@ -1520,7 +1610,7 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   generateMissedFollowUpManagerAlertText(lead, agent, manager, agency, daysOverdue) {
-    const followUpDate = lead.followUpDate 
+    const followUpDate = lead.followUpDate
       ? new Date(lead.followUpDate).toLocaleDateString()
       : 'TBD';
 
@@ -1645,6 +1735,374 @@ View lead details: ${process.env.CLIENT_URL}/agency/leads/${lead._id}
 Best regards,
 ${agency?.name || 'SPIRELEAP'} Team
     `;
+  }
+
+  async sendBulkLeadNotification(lead, agency, recipients) {
+    try {
+      if (!recipients || recipients.length === 0) {
+        console.log('No recipients available for lead notification');
+        return null;
+      }
+
+      const mailOptions = {
+        from: `"${agency?.name || 'SPIRELEAP'}" <${process.env.SMTP_USER}>`,
+        to: recipients.join(','),
+        subject: `New Property Enquiry: ${lead.contact.firstName} ${lead.contact.lastName}`,
+        html: this.generateLeadNotificationHTML(lead, { firstName: 'Admin', lastName: '' }, agency),
+        text: this.generateLeadNotificationText(lead, { firstName: 'Admin', lastName: '' }, agency)
+      };
+
+      const result = await this.transporter.sendMail(mailOptions);
+      console.log('Bulk lead notification email sent:', result.messageId);
+      return result;
+    } catch (error) {
+      console.error('Error sending bulk lead notification email:', error);
+      throw error;
+    }
+  }
+
+  async sendContactMessageNotification(message, agency, recipients) {
+    try {
+      if (!recipients || recipients.length === 0) {
+        console.log('No recipients available for contact message notification');
+        return null;
+      }
+
+      const mailOptions = {
+        from: `"${agency?.name || 'SPIRELEAP'}" <${process.env.SMTP_USER}>`,
+        to: recipients.join(','),
+        subject: `New Contact Enquiry: ${message.name}`,
+        html: this.generateContactMessageNotificationHTML(message, agency),
+        text: this.generateContactMessageNotificationText(message, agency)
+      };
+
+      const result = await this.transporter.sendMail(mailOptions);
+      console.log('Contact message notification email sent:', result.messageId);
+      return result;
+    } catch (error) {
+      console.error('Error sending contact message notification email:', error);
+      throw error;
+    }
+  }
+
+  generateContactMessageNotificationHTML(message, agency) {
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>New Contact Enquiry</title>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #f8f9fa; padding: 20px; border-radius: 5px; margin-bottom: 20px; border-left: 4px solid #2c5aa0; }
+          .details { background: #fff; border: 1px solid #ddd; padding: 20px; border-radius: 5px; }
+          .message-box { background: #f4f4f4; padding: 15px; border-radius: 5px; margin: 15px 0; font-style: italic; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1 style="margin: 0;">New Contact Enquiry</h1>
+            <p>A new visitor has submitted a contact form on your website.</p>
+          </div>
+          <div class="details">
+            <h2 style="color: #2c5aa0; border-bottom: 1px solid #eee; padding-bottom: 10px;">Visitor Details</h2>
+            <p><strong>Name:</strong> ${message.name}</p>
+            <p><strong>Email:</strong> ${message.email}</p>
+            <p><strong>Phone:</strong> ${message.phone || 'N/A'}</p>
+            <p><strong>Subject:</strong> ${message.subject || 'N/A'}</p>
+            <p><strong>Message:</strong></p>
+            <div class="message-box">
+              ${message.message}
+            </div>
+            <p><strong>Agency:</strong> ${agency?.name || 'N/A'}</p>
+          </div>
+          <p style="text-align: center; color: #666; font-size: 12px; margin-top: 30px;">
+            Best regards,<br>
+            <strong>${agency?.name || 'SPIRELEAP'} Team</strong>
+          </p>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
+  generateContactMessageNotificationText(message, agency) {
+    return `
+New Contact Enquiry
+
+A new visitor has submitted a contact form on your website.
+
+Visitor Details:
+- Name: ${message.name}
+- Email: ${message.email}
+- Phone: ${message.phone || 'N/A'}
+- Subject: ${message.subject || 'N/A'}
+- Message: ${message.message}
+- Agency: ${agency?.name || 'N/A'}
+
+Best regards,
+${agency?.name || 'SPIRELEAP'} Team
+    `;
+  }
+
+  async sendNewPropertyNotificationToAdmin(property, agent, agency, recipients) {
+    try {
+      if (!recipients || recipients.length === 0) {
+        console.log('No recipients available for new property notification');
+        return null;
+      }
+
+      const mailOptions = {
+        from: `"${agency?.name || 'SPIRELEAP'}" <${process.env.SMTP_USER}>`,
+        to: recipients.join(','),
+        subject: `New Property Listing Added: ${property.title}`,
+        html: this.generateNewPropertyListingHTML(property, agent, agency),
+        text: this.generateNewPropertyListingText(property, agent, agency)
+      };
+
+      const result = await this.transporter.sendMail(mailOptions);
+      console.log('New property listing notification sent:', result.messageId);
+      return result;
+    } catch (error) {
+      console.error('Error sending new property listing notification:', error);
+      throw error;
+    }
+  }
+
+  generateNewPropertyListingHTML(property, agent, agency) {
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>New Property Listing Added</title>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #eef2f7; padding: 20px; border-radius: 5px; margin-bottom: 20px; border-left: 4px solid #2c5aa0; }
+          .property-details { background: #fff; border: 1px solid #ddd; padding: 20px; border-radius: 5px; }
+          .button { display: inline-block; background: #2c5aa0; color: white; padding: 12px 24px; text-decoration: none; border-radius: 5px; margin: 10px 0; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1 style="margin: 0;">New Property Listing</h1>
+            <p>An agent has added a new property listing that requires your review.</p>
+          </div>
+          
+          <div class="property-details">
+            <h2>Listing Information</h2>
+            <p><strong>Title:</strong> ${property.title}</p>
+            <p><strong>Agent:</strong> ${agent.firstName || ''} ${agent.lastName || ''}</p>
+            <p><strong>Property Type:</strong> ${property.propertyType}</p>
+            <p><strong>Listing Type:</strong> ${property.listingType}</p>
+            <p><strong>Location:</strong> ${property.location?.address || 'N/A'}, ${property.location?.city || 'N/A'}</p>
+            
+            <div style="text-align: center; margin: 30px 0;">
+              <a href="${process.env.CLIENT_URL}/agency/properties/${property._id}" class="button">Review Property</a>
+            </div>
+            
+            <p>Best regards,<br>
+            ${agency?.name || 'SPIRELEAP'} Team</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
+  generateNewPropertyListingText(property, agent, agency) {
+    return `
+New Property Listing Added
+
+An agent has added a new property listing that requires your review.
+
+Listing Information:
+- Title: ${property.title}
+- Agent: ${agent.firstName || ''} ${agent.lastName || ''}
+- Property Type: ${property.propertyType}
+- Listing Type: ${property.listingType}
+- Location: ${property.location?.address || 'N/A'}, ${property.location?.city || 'N/A'}
+
+Review Property: ${process.env.CLIENT_URL}/agency/properties/${property._id}
+
+Best regards,
+${agency?.name || 'SPIRELEAP'} Team
+    `;
+  }
+
+  async sendPropertyStatusUpdateNotification(property, agent, agency, recipients, newStatus) {
+    try {
+      if (!recipients || recipients.length === 0) {
+        return null;
+      }
+
+      const statusLabels = {
+        'sold': 'SOLD',
+        'rented': 'RENTED',
+        'unavailable': 'UNAVAILABLE',
+        'inactive': 'UNAVAILABLE'
+      };
+
+      const label = statusLabels[newStatus] || newStatus.toUpperCase();
+
+      const mailOptions = {
+        from: `"${agency?.name || 'SPIRELEAP'}" <${process.env.SMTP_USER}>`,
+        to: recipients.join(','),
+        subject: `Property Status Updated to ${label}: ${property.title}`,
+        html: this.generatePropertyStatusUpdateHTML(property, agent, agency, label),
+        text: this.generatePropertyStatusUpdateText(property, agent, agency, label)
+      };
+
+      const result = await this.transporter.sendMail(mailOptions);
+      console.log(`Property status update notification (${label}) sent:`, result.messageId);
+      return result;
+    } catch (error) {
+      console.error('Error sending property status update notification:', error);
+      throw error;
+    }
+  }
+
+  generatePropertyStatusUpdateHTML(property, agent, agency, statusLabel) {
+    const color = statusLabel === 'SOLD' ? '#d32f2f' : statusLabel === 'RENTED' ? '#2e7d32' : '#757575';
+
+    return `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="utf-8">
+        <title>Property Status Updated: ${statusLabel}</title>
+        <style>
+          body { font-family: Arial, sans-serif; line-height: 1.6; color: #333; }
+          .container { max-width: 600px; margin: 0 auto; padding: 20px; }
+          .header { background: #f4f6f8; padding: 20px; border-radius: 5px; margin-bottom: 20px; border-left: 4px solid ${color}; }
+          .property-details { background: #fff; border: 1px solid #ddd; padding: 20px; border-radius: 5px; }
+          .badge { display: inline-block; background: ${color}; color: white; padding: 5px 12px; border-radius: 4px; font-weight: bold; text-transform: uppercase; }
+        </style>
+      </head>
+      <body>
+        <div class="container">
+          <div class="header">
+            <h1 style="margin: 0;">Property Status Update</h1>
+            <p>The status of a property has been updated to <span class="badge">${statusLabel}</span>.</p>
+          </div>
+          
+          <div class="property-details">
+            <h2>Listing Information</h2>
+            <p><strong>Title:</strong> ${property.title}</p>
+            <p><strong>New Status:</strong> <span style="color: ${color}; font-weight: bold;">${statusLabel}</span></p>
+            <p><strong>Agent:</strong> ${agent?.firstName || ''} ${agent?.lastName || ''}</p>
+            <p><strong>Location:</strong> ${property.location?.address || 'N/A'}, ${property.location?.city || 'N/A'}</p>
+            
+            <p>This listing has been updated in the CRM.</p>
+            
+            <p>Best regards,<br>
+            ${agency?.name || 'SPIRELEAP'} Team</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+  }
+
+  generatePropertyStatusUpdateText(property, agent, agency, statusLabel) {
+    return `
+Property Status Update
+
+The status of the following property has been updated to ${statusLabel}.
+
+Listing Information:
+- Title: ${property.title}
+- New Status: ${statusLabel}
+- Agent: ${agent?.firstName || ''} ${agent?.lastName || ''}
+- Location: ${property.location?.address || 'N/A'}, ${property.location?.city || 'N/A'}
+
+Best regards,
+${agency?.name || 'SPIRELEAP'} Team
+    `;
+  }
+
+  async sendPasswordChangeConfirmation(user) {
+    try {
+      const mailOptions = {
+        from: `"SPIRELEAP Real Estate" <${process.env.SMTP_USER}>`,
+        to: user.email,
+        subject: 'Security Alert: Your Password Was Changed',
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-top: 4px solid #d32f2f; border-radius: 5px;">
+            <h2 style="color: #d32f2f;">Security Alert</h2>
+            <p>Dear ${user.firstName},</p>
+            <p>This is a confirmation that the password for your SPIRELEAP CRM account was recently changed.</p>
+            <p>If you made this change, you can safely ignore this email.</p>
+            <p><strong>If you did NOT change your password</strong>, please contact your administrator immediately or use the "Forgot Password" link on the login page to secure your account.</p>
+            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
+            <p style="font-size: 12px; color: #666;">This is an automated security notification. Please do not reply to this email.</p>
+          </div>
+        `,
+        text: `Security Alert: Your password was recently changed. If you did not make this change, please contact your administrator immediately.`
+      };
+
+      const result = await this.transporter.sendMail(mailOptions);
+      return result;
+    } catch (error) {
+      console.error('Error sending password change confirmation:', error);
+    }
+  }
+
+  async sendProfileUpdateNotification(user) {
+    try {
+      const mailOptions = {
+        from: `"SPIRELEAP Real Estate" <${process.env.SMTP_USER}>`,
+        to: user.email,
+        subject: 'Profile Information Updated',
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-top: 4px solid #2c5aa0; border-radius: 5px;">
+            <h2 style="color: #2c5aa0;">Profile Updated</h2>
+            <p>Dear ${user.firstName},</p>
+            <p>Your profile information on SPIRELEAP CRM has been successfully updated.</p>
+            <p>If you did not perform this action, please review your account settings or contact an administrator.</p>
+            <p>Best regards,<br>SPIRELEAP team</p>
+          </div>
+        `,
+        text: `Your profile information on SPIRELEAP CRM has been updated.`
+      };
+
+      await this.transporter.sendMail(mailOptions);
+    } catch (error) {
+      console.error('Error sending profile update notification:', error);
+    }
+  }
+
+  async sendRoleChangeNotification(user, oldRole, newRole) {
+    try {
+      const formatRole = (role) => role.replace('_', ' ').toUpperCase();
+      const mailOptions = {
+        from: `"SPIRELEAP Real Estate" <${process.env.SMTP_USER}>`,
+        to: user.email,
+        subject: 'Account Role Updated',
+        html: `
+          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-top: 4px solid #f39c12; border-radius: 5px;">
+            <h2 style="color: #f39c12;">Role Updated</h2>
+            <p>Dear ${user.firstName},</p>
+            <p>Your account role in the SPIRELEAP CRM has been updated by an administrator.</p>
+            <div style="background: #fdf2e9; padding: 15px; border-radius: 5px; margin: 20px 0;">
+              <p style="margin: 0;"><strong>Previous Role:</strong> ${formatRole(oldRole)}</p>
+              <p style="margin: 5px 0 0 0;"><strong>New Role:</strong> ${formatRole(newRole)}</p>
+            </div>
+            <p>Your permissions in the system have been adjusted accordingly. Please log out and log back in to see the changes.</p>
+            <p>Best regards,<br>SPIRELEAP team</p>
+          </div>
+        `,
+        text: `Your account role has been updated from ${oldRole} to ${newRole}. Please log out and log back in.`
+      };
+
+      await this.transporter.sendMail(mailOptions);
+    } catch (error) {
+      console.error('Error sending role change notification:', error);
+    }
   }
 }
 

@@ -90,7 +90,7 @@ router.post('/register', [
       // This covers agents created by agency admins
       userData.isActive = true;
     }
-    
+
     // Allow explicit isActive override from request body (for admin-created users)
     if (req.body.isActive !== undefined) {
       userData.isActive = req.body.isActive === true || req.body.isActive === 'true';
@@ -137,33 +137,33 @@ router.post('/register', [
       code: error.code,
       keyValue: error.keyValue
     });
-    
+
     // Handle specific error types
     if (error.name === 'ValidationError') {
       const validationErrors = Object.values(error.errors).map(err => err.message);
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'Validation error',
         errors: validationErrors
       });
     }
-    
+
     // Handle duplicate key error (email already exists)
     if (error.code === 11000 || error.name === 'MongoServerError') {
       const field = Object.keys(error.keyValue || {})[0];
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: `${field ? field.charAt(0).toUpperCase() + field.slice(1) : 'Field'} already exists`
       });
     }
-    
+
     // Handle CastError (invalid ObjectId format)
     if (error.name === 'CastError') {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: `Invalid ${error.path || 'field'} format`
       });
     }
-    
+
     // Return more detailed error for debugging in development
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Server error during registration',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
@@ -186,7 +186,7 @@ router.post('/login', [
     const { email, password } = req.body;
 
     if (!email || !password) {
-      return res.status(400).json({ 
+      return res.status(400).json({
         message: 'Email and password are required',
         error: 'MISSING_CREDENTIALS'
       });
@@ -201,10 +201,10 @@ router.post('/login', [
     // Find user by email - IMPORTANT: select password field explicitly
     // Password is excluded by default in toJSON, so we need to select it
     const user = await User.findOne({ email: normalizedEmail }).select('+password');
-    
+
     if (!user) {
       console.log(`Login attempt failed: User not found for email: ${normalizedEmail}`);
-      return res.status(401).json({ 
+      return res.status(401).json({
         message: 'Invalid email or password',
         error: 'USER_NOT_FOUND'
       });
@@ -215,7 +215,7 @@ router.post('/login', [
     // Check if user is active
     if (!user.isActive) {
       console.log(`Login attempt failed: Account inactive for email: ${normalizedEmail}`);
-      return res.status(401).json({ 
+      return res.status(401).json({
         message: 'Your account is pending approval. Please contact an administrator.',
         error: 'ACCOUNT_INACTIVE'
       });
@@ -229,10 +229,10 @@ router.post('/login', [
 
     const isMatch = await user.comparePassword(trimmedPassword);
     console.log(`Password match result: ${isMatch}`);
-    
+
     if (!isMatch) {
       console.log(`Login attempt failed: Invalid password for email: ${normalizedEmail}`);
-      return res.status(401).json({ 
+      return res.status(401).json({
         message: 'Invalid email or password',
         error: 'INVALID_PASSWORD'
       });
@@ -263,9 +263,9 @@ router.post('/login', [
     });
   } catch (error) {
     console.error('Login error:', error);
-    res.status(500).json({ 
+    res.status(500).json({
       message: 'Server error during login',
-      error: error.message 
+      error: error.message
     });
   }
 });
@@ -326,7 +326,7 @@ router.post('/forgot-password', [
 
     const { email } = req.body;
     const user = await User.findOne({ email });
-    
+
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
@@ -383,6 +383,15 @@ router.post('/reset-password', [
     // Update password
     user.password = password;
     await user.save();
+
+    // Send confirmation email in background
+    setImmediate(async () => {
+      try {
+        await emailService.sendPasswordChangeConfirmation(user);
+      } catch (emailError) {
+        console.error('Error sending password confirmation email:', emailError);
+      }
+    });
 
     res.json({ message: 'Password reset successfully' });
   } catch (error) {

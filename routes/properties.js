@@ -4,7 +4,8 @@ const mongoose = require('mongoose');
 const Property = require('../models/Property');
 const User = require('../models/User');
 const Agency = require('../models/Agency');
-const { auth, authorize, optionalAuth } = require('../middleware/auth');
+const { auth, authorize, optionalAuth, checkModulePermission } = require('../middleware/auth');
+const emailService = require('../services/emailService');
 
 const router = express.Router();
 
@@ -42,15 +43,33 @@ router.get('/', optionalAuth, [
 
     const filter = {};
 
-    // Role-based filtering
-    if (req.user) {
-      if (req.user.role === 'agency_admin') {
-        filter.agency = req.user.agency;
+    // Role-based filtering - Strict isolation for management
+    if (req.user && req.user.role !== 'super_admin' && req.user.role !== 'staff') {
+      const uId = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
+      const aId = req.user.agency && mongoose.Types.ObjectId.isValid(req.user.agency) ? new mongoose.Types.ObjectId(req.user.agency) : req.user.agency;
+
+      // Determine if this is a public search (only status='active' requested)
+      const isPublicSearch = req.query.status === 'active';
+
+      if (req.user.role === 'agency_admin' || req.user.role === 'staff') {
+        const userRole = req.user.role;
+        // For public search, allow seeing all. For management, restrict to their agency.
+        if (!isPublicSearch) {
+          filter.agency = aId;
+          // Respect entry permission settings
+          filter[`entryPermissions.${userRole}.view`] = { $ne: false };
+        }
       } else if (req.user.role === 'agent') {
-        filter.$or = [
-          { agent: req.user.id },
-          { createdBy: req.user.id }
-        ];
+        // For public search, allow seeing all. For management, restrict to their own properties.
+        if (!isPublicSearch) {
+          filter.agency = aId;
+          filter.$or = [
+            { agent: uId },
+            { createdBy: uId }
+          ];
+          // Respect entry permission settings
+          filter['entryPermissions.agent.view'] = { $ne: false };
+        }
       }
     }
 
@@ -318,7 +337,7 @@ router.get('/:id/leads', auth, async (req, res) => {
 // @access  Private
 router.post('/:id/notes', [
   auth,
-  authorize('super_admin', 'agency_admin', 'agent'),
+  checkModulePermission('properties', 'edit'),
   body('note').trim().notEmpty().withMessage('Note is required')
 ], async (req, res) => {
   try {
@@ -369,7 +388,7 @@ router.post('/:id/notes', [
 // @access  Private (Super Admin, Agency Admin)
 router.put('/:id/assign', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('properties', 'edit'),
   param('id').isMongoId().withMessage('Invalid property ID'),
   body('agent').isMongoId().withMessage('Valid agent ID is required')
 ], async (req, res) => {
@@ -458,26 +477,34 @@ router.get('/:id', optionalAuth, async (req, res) => {
       if (property.status !== 'active') {
         return res.status(403).json({ message: 'Property not available' });
       }
-    } else {
-      // Get agency ID safely (handle both populated object and ObjectId)
-      const propertyAgencyId = property.agency
-        ? (typeof property.agency === 'object' && property.agency._id
-          ? property.agency._id.toString()
-          : property.agency.toString())
-        : null;
+    } else if (req.user.role !== 'super_admin') {
+      // If it's an active property, allow any logged-in user to see it (Public View)
+      if (property.status === 'active') {
+        // Continue
+      } else {
+        // Strict isolation for non-active properties
+        const propertyAgencyId = property.agency
+          ? (typeof property.agency === 'object' && property.agency._id
+            ? property.agency._id.toString()
+            : property.agency.toString())
+          : null;
 
-      // Get agent ID safely (handle both populated object and ObjectId)
-      const propertyAgentId = property.agent
-        ? (typeof property.agent === 'object' && property.agent._id
-          ? property.agent._id.toString()
-          : property.agent.toString())
-        : null;
+        const propertyAgentId = property.agent
+          ? (typeof property.agent === 'object' && property.agent._id
+            ? property.agent._id.toString()
+            : property.agent.toString())
+          : null;
 
-      if (req.user.role === 'agency_admin' && propertyAgencyId && propertyAgencyId !== req.user.agency) {
-        return res.status(403).json({ message: 'Access denied' });
-      }
-      if (req.user.role === 'agent' && propertyAgentId && propertyAgentId !== req.user.id) {
-        return res.status(403).json({ message: 'Access denied' });
+        const creatorId = property.createdBy?.toString();
+
+        if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && propertyAgencyId && propertyAgencyId !== req.user.agency) {
+          return res.status(403).json({ message: 'Access denied' });
+        }
+        if (req.user.role === 'agent') {
+          if (propertyAgentId !== req.user.id && creatorId !== req.user.id) {
+            return res.status(403).json({ message: 'Access denied' });
+          }
+        }
       }
     }
 
@@ -516,26 +543,34 @@ router.get('/slug/:slug', optionalAuth, async (req, res) => {
       if (property.status !== 'active') {
         return res.status(403).json({ message: 'Property not available' });
       }
-    } else {
-      // Get agency ID safely (handle both populated object and ObjectId)
-      const propertyAgencyId = property.agency
-        ? (typeof property.agency === 'object' && property.agency._id
-          ? property.agency._id.toString()
-          : property.agency.toString())
-        : null;
+    } else if (req.user.role !== 'super_admin') {
+      // If it's an active property, allow viewing even if not assigned (Public View)
+      if (property.status === 'active') {
+        // Continue
+      } else {
+        // Strict isolation for non-active properties
+        const propertyAgencyId = property.agency
+          ? (typeof property.agency === 'object' && property.agency._id
+            ? property.agency._id.toString()
+            : property.agency.toString())
+          : null;
 
-      // Get agent ID safely (handle both populated object and ObjectId)
-      const propertyAgentId = property.agent
-        ? (typeof property.agent === 'object' && property.agent._id
-          ? property.agent._id.toString()
-          : property.agent.toString())
-        : null;
+        const propertyAgentId = property.agent
+          ? (typeof property.agent === 'object' && property.agent._id
+            ? property.agent._id.toString()
+            : property.agent.toString())
+          : null;
 
-      if (req.user.role === 'agency_admin' && propertyAgencyId && propertyAgencyId !== req.user.agency) {
-        return res.status(403).json({ message: 'Access denied' });
-      }
-      if (req.user.role === 'agent' && propertyAgentId && propertyAgentId !== req.user.id) {
-        return res.status(403).json({ message: 'Access denied' });
+        const creatorId = property.createdBy?.toString();
+
+        if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && propertyAgencyId && propertyAgencyId !== req.user.agency) {
+          return res.status(403).json({ message: 'Access denied' });
+        }
+        if (req.user.role === 'agent') {
+          if (propertyAgentId !== req.user.id && creatorId !== req.user.id) {
+            return res.status(403).json({ message: 'Access denied' });
+          }
+        }
       }
     }
 
@@ -559,7 +594,7 @@ router.get('/slug/:slug', optionalAuth, async (req, res) => {
 
 router.post('/', [
   auth,
-  authorize('super_admin', 'agency_admin', 'agent'),
+  checkModulePermission('properties', 'create'),
   body('title').trim().notEmpty().withMessage('Title is required'),
   body('description').trim().notEmpty().withMessage('Description is required'),
   body('propertyType').isIn(['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'other']).withMessage('Invalid property type'),
@@ -685,6 +720,33 @@ router.post('/', [
       .populate('category', 'name')
       .populate('amenities', 'name icon');
 
+    // Send notification to Agency Admins if an agent created the property
+    if (req.user.role === 'agent') {
+      setImmediate(async () => {
+        try {
+          // Find all active agency admins for this agency
+          const agencyAdmins = await User.find({
+            agency: populatedProperty.agency?._id || populatedProperty.agency,
+            role: 'agency_admin',
+            isActive: true
+          }).select('email');
+
+          const recipientEmails = agencyAdmins.map(admin => admin.email).filter(Boolean);
+
+          if (recipientEmails.length > 0) {
+            await emailService.sendNewPropertyNotificationToAdmin(
+              populatedProperty,
+              populatedProperty.agent || { firstName: 'Agent', lastName: '' },
+              populatedProperty.agency,
+              recipientEmails
+            );
+          }
+        } catch (notifError) {
+          console.error('Error sending new property listing notification:', notifError);
+        }
+      });
+    }
+
     res.status(201).json(populatedProperty);
   } catch (error) {
     console.error('Create property error:', error);
@@ -700,7 +762,7 @@ router.post('/', [
 // @access  Private (Super Admin, Agency Admin)
 router.put('/:id/approve', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('properties', 'edit'),
   param('id').isMongoId().withMessage('Invalid property ID'),
   body('status').isIn(['active', 'inactive']).withMessage('Status must be active or inactive'),
   body('rejectionReason').optional().trim()
@@ -750,20 +812,20 @@ router.put('/:id/approve', [
 
     await property.save();
 
-    // Send notification to agent
-    const emailService = require('../services/emailService');
-    try {
-      if (property.agent && property.agent.email) {
-        if (req.body.status === 'active') {
-          await emailService.sendPropertyApprovalNotification(property, property.agent, property.agency);
-        } else {
-          await emailService.sendPropertyRejectionNotification(property, property.agent, property.agency, req.body.rejectionReason);
+    // Send notification to agent in background
+    setImmediate(async () => {
+      try {
+        if (property.agent && property.agent.email) {
+          if (req.body.status === 'active') {
+            await emailService.sendPropertyApprovalNotification(property, property.agent, property.agency);
+          } else {
+            await emailService.sendPropertyRejectionNotification(property, property.agent, property.agency, req.body.rejectionReason);
+          }
         }
+      } catch (notifError) {
+        console.error('Error sending property approval notification:', notifError);
       }
-    } catch (notifError) {
-      console.error('Error sending property approval notification:', notifError);
-      // Don't fail the request if notification fails
-    }
+    });
 
     const updatedProperty = await Property.findById(property._id)
       .populate('agency', 'name logo')
@@ -783,7 +845,7 @@ router.put('/:id/approve', [
 
 router.put('/:id', [
   auth,
-  authorize('super_admin', 'agency_admin', 'agent'),
+  checkModulePermission('properties', 'edit'),
   param('id').isMongoId().withMessage('Invalid property ID')
 ], async (req, res) => {
   try {
@@ -801,11 +863,14 @@ router.put('/:id', [
     const propertyAgencyId = property.agency ? property.agency.toString() : null;
     const propertyAgentId = property.agent ? property.agent.toString() : null;
 
-    if (req.user.role === 'agency_admin' && propertyAgencyId && propertyAgencyId !== req.user.agency) {
-      return res.status(403).json({ message: 'Access denied' });
+    if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && propertyAgencyId && propertyAgencyId !== req.user.agency) {
+      return res.status(403).json({ message: 'Access denied to this agency property' });
     }
-    if (req.user.role === 'agent' && propertyAgentId && propertyAgentId !== req.user.id) {
-      return res.status(403).json({ message: 'Access denied' });
+    if (req.user.role === 'agent') {
+      const creatorId = property.createdBy?.toString();
+      if (propertyAgentId !== req.user.id && creatorId !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. You can only edit your own assigned properties.' });
+      }
     }
 
     // Creator-based permission restrictions
@@ -826,6 +891,10 @@ router.put('/:id', [
       req.body.status = 'pending';
     }
 
+    // Capture old state for status change notifications
+    const oldStatus = property.status;
+    const newStatus = req.body.status;
+
     Object.assign(property, req.body);
     await property.save();
 
@@ -834,6 +903,45 @@ router.put('/:id', [
       .populate('agent', 'firstName lastName email phone')
       .populate('category', 'name')
       .populate('amenities', 'name icon');
+
+    // Send notifications for Sold, Rented, Unavailable status updates
+    const importantStatuses = ['sold', 'rented', 'unavailable', 'inactive'];
+    if (newStatus && newStatus !== oldStatus && importantStatuses.includes(newStatus)) {
+      setImmediate(async () => {
+        try {
+          // Get Agency Admins for this agency
+          const agencyAdmins = await User.find({
+            agency: updatedProperty.agency?._id || updatedProperty.agency,
+            role: 'agency_admin',
+            isActive: true
+          }).select('email');
+
+          const recipientEmails = new Set();
+
+          // Add Agency Admins
+          agencyAdmins.forEach(admin => recipientEmails.add(admin.email));
+
+          // Add the concerned Agent
+          if (updatedProperty.agent && updatedProperty.agent.email) {
+            recipientEmails.add(updatedProperty.agent.email);
+          }
+
+          const recipientsArray = Array.from(recipientEmails).filter(Boolean);
+
+          if (recipientsArray.length > 0) {
+            await emailService.sendPropertyStatusUpdateNotification(
+              updatedProperty,
+              updatedProperty.agent,
+              updatedProperty.agency,
+              recipientsArray,
+              newStatus
+            );
+          }
+        } catch (notifError) {
+          console.error('Error sending property status update notification:', notifError);
+        }
+      });
+    }
 
     res.json(updatedProperty);
   } catch (error) {
@@ -1039,7 +1147,7 @@ router.delete('/bulk', [
 
 router.delete('/:id', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('properties', 'delete'),
   param('id').isMongoId().withMessage('Invalid property ID')
 ], async (req, res) => {
   try {
@@ -1055,9 +1163,21 @@ router.delete('/:id', [
 
     // Get agency ID safely (handle both ObjectId and null)
     const propertyAgencyId = property.agency ? property.agency.toString() : null;
+    const propertyAgentId = property.agent ? property.agent.toString() : null;
+    const creatorId = property.createdBy?.toString();
 
-    if (req.user.role === 'agency_admin' && propertyAgencyId && propertyAgencyId !== req.user.agency) {
-      return res.status(403).json({ message: 'Access denied' });
+    if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && propertyAgencyId && propertyAgencyId !== req.user.agency) {
+      return res.status(403).json({ message: 'Access denied to this agency property' });
+    }
+
+    if (req.user.role === 'agent') {
+      if (propertyAgentId !== req.user.id && creatorId !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. You can only delete your own assigned properties.' });
+      }
+      // Also ensure it's in their agency
+      if (propertyAgencyId && propertyAgencyId !== req.user.agency) {
+        return res.status(403).json({ message: 'Access denied' });
+      }
     }
 
     await Property.deleteOne({ _id: req.params.id });
@@ -1065,6 +1185,34 @@ router.delete('/:id', [
   } catch (error) {
     console.error('Delete property error:', error);
     res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/properties/:id/entry-permissions
+// @desc    Update entry-specific permissions for a property
+// @access  Private (Super Admin)
+router.put('/:id/entry-permissions', auth, authorize('super_admin'), async (req, res) => {
+  try {
+    const { entryPermissions } = req.body;
+
+    if (!entryPermissions) {
+      return res.status(400).json({ message: 'entryPermissions is required' });
+    }
+
+    const property = await Property.findByIdAndUpdate(
+      req.params.id,
+      { $set: { entryPermissions } },
+      { new: true, runValidators: true }
+    );
+
+    if (!property) {
+      return res.status(404).json({ message: 'Property not found' });
+    }
+
+    res.json(property);
+  } catch (error) {
+    console.error('Update entry permissions error:', error);
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
