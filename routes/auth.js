@@ -196,25 +196,19 @@ router.post('/login', [
     const normalizedEmail = email.toLowerCase().trim();
     const trimmedPassword = password.trim();
 
-    console.log(`Login attempt for email: ${normalizedEmail}`);
-
     // Find user by email - IMPORTANT: select password field explicitly
     // Password is excluded by default in toJSON, so we need to select it
     const user = await User.findOne({ email: normalizedEmail }).select('+password');
 
     if (!user) {
-      console.log(`Login attempt failed: User not found for email: ${normalizedEmail}`);
       return res.status(401).json({
         message: 'Invalid email or password',
         error: 'USER_NOT_FOUND'
       });
     }
 
-    console.log(`User found: ${user.email}, Role: ${user.role}, Active: ${user.isActive}, Has Password: ${!!user.password}`);
-
     // Check if user is active
     if (!user.isActive) {
-      console.log(`Login attempt failed: Account inactive for email: ${normalizedEmail}`);
       return res.status(401).json({
         message: 'Your account is pending approval. Please contact an administrator.',
         error: 'ACCOUNT_INACTIVE'
@@ -223,29 +217,23 @@ router.post('/login', [
 
     // Check password - make sure password field exists
     if (!user.password) {
-      console.error(`Login error: User ${user._id} has no password field`);
       return res.status(500).json({ message: 'Account error. Please contact support.' });
     }
 
     const isMatch = await user.comparePassword(trimmedPassword);
-    console.log(`Password match result: ${isMatch}`);
 
     if (!isMatch) {
-      console.log(`Login attempt failed: Invalid password for email: ${normalizedEmail}`);
       return res.status(401).json({
         message: 'Invalid email or password',
         error: 'INVALID_PASSWORD'
       });
     }
 
-    // Update last login
-    user.lastLogin = new Date();
-    await user.save();
+    // Update last login (Non-blocking)
+    User.updateOne({ _id: user._id }, { $set: { lastLogin: new Date() } }).catch(err => console.error('Last login update error:', err));
 
     // Generate token
     const token = generateToken(user._id);
-
-    console.log(`Login successful for user: ${user.email} (${user.role})`);
 
     res.json({
       message: 'Login successful',
