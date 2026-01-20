@@ -83,7 +83,6 @@ emailTemplateSchema.pre('save', function(next) {
 });
 
 // Indexes
-emailTemplateSchema.index({ slug: 1 });
 emailTemplateSchema.index({ category: 1 });
 emailTemplateSchema.index({ isActive: 1 });
 

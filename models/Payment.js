@@ -89,7 +89,6 @@ paymentSchema.index({ lead: 1 });
 paymentSchema.index({ property: 1 });
 paymentSchema.index({ agency: 1 });
 paymentSchema.index({ status: 1 });
-paymentSchema.index({ gatewayPaymentId: 1 });
 paymentSchema.index({ paymentDate: -1 });
 
 module.exports = mongoose.model('Payment', paymentSchema);

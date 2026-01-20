@@ -428,7 +428,6 @@ leadSchema.pre('save', async function (next) {
 });
 
 // Indexes
-leadSchema.index({ leadId: 1 });
 leadSchema.index({ 'contact.email': 1, 'contact.phone': 1 });
 leadSchema.index({ status: 1, priority: 1 });
 leadSchema.index({ agency: 1, assignedAgent: 1 });

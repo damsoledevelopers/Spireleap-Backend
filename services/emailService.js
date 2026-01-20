@@ -2,15 +2,36 @@ const nodemailer = require('nodemailer');
 
 class EmailService {
   constructor() {
-    this.transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: process.env.SMTP_PORT || 587,
-      secure: false, // true for 465, false for other ports
-      auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
-      }
-    });
+    const smtpUser = process.env.SMTP_USER;
+    const smtpPass = process.env.SMTP_PASS;
+
+    // Check if credentials are properly configured (not default placeholders)
+    const isConfigured = smtpUser &&
+      smtpPass &&
+      !smtpUser.includes('your_email') &&
+      !smtpPass.includes('your_app_password');
+
+    if (!isConfigured) {
+      console.log('EmailService: SMTP not configured or using default placeholders. Emails will be suppressed.');
+      // Create a mock transporter
+      this.transporter = {
+        sendMail: async (mailOptions) => {
+          // Silent success to prevent application errors
+          // console.log(`[Mock Email] Subject: ${mailOptions.subject} | To: ${mailOptions.to}`);
+          return { messageId: 'mock-id-suppressed' };
+        }
+      };
+    } else {
+      this.transporter = nodemailer.createTransport({
+        host: process.env.SMTP_HOST || 'smtp.gmail.com',
+        port: process.env.SMTP_PORT || 587,
+        secure: false, // true for 465, false for other ports
+        auth: {
+          user: smtpUser,
+          pass: smtpPass
+        }
+      });
+    }
   }
 
   async sendPasswordResetEmail(user, resetToken) {

@@ -251,7 +251,6 @@ router.get('/stats/overview', [
 // @access  Private
 router.get('/:id', [
   auth,
-  checkModulePermission('users', 'view'),
   param('id').custom((value) => {
     if (!value) {
       throw new Error('User ID is required');
@@ -341,7 +340,6 @@ router.get('/:id', [
 // @access  Private
 router.put('/:id', [
   auth,
-  checkModulePermission('users', 'edit'),
   param('id').custom((value) => {
     if (!value) {
       throw new Error('User ID is required');
@@ -570,10 +568,9 @@ router.put('/:id/status', [
 
 // @route   DELETE /api/users/:id
 // @desc    Delete user
-// @access  Private (Super Admin, Agency Admin)
+// @access  Private (Super Admin, Agency Admin, Self)
 router.delete('/:id', [
   auth,
-  checkModulePermission('users', 'delete'),
   param('id').custom((value) => {
     if (!value) {
       throw new Error('User ID is required');
@@ -600,16 +597,25 @@ router.delete('/:id', [
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Prevent user from deleting themselves
-    if (user._id.toString() === req.user.id) {
-      return res.status(400).json({ message: 'Cannot delete your own account' });
-    }
+    // Authorization Logic
+    const isSelf = user._id.toString() === req.user.id;
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const isAgencyAdmin = req.user.role === 'agency_admin';
 
-    // Agency admin can only delete users from their agency
-    if (req.user.role === 'agency_admin' && user.agency?.toString() !== req.user.agency) {
-      return res.status(403).json({
-        message: 'Not authorized to delete this user'
-      });
+    // 1. Allow Self Deletion
+    // 2. Allow Super Admin to delete anyone
+    // 3. Allow Agency Admin to delete users in their agency (check agency match)
+
+    if (!isSelf && !isSuperAdmin) {
+      if (isAgencyAdmin) {
+        // Check if target user belongs to the same agency
+        if (user.agency?.toString() !== req.user.agency) {
+          return res.status(403).json({ message: 'Not authorized to delete this user (Agency Mismatch)' });
+        }
+      } else {
+        // Agents/Staff/Users cannot delete others
+        return res.status(403).json({ message: 'Not authorized to delete this user' });
+      }
     }
 
     await User.findByIdAndDelete(req.params.id);
