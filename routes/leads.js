@@ -185,13 +185,44 @@ router.get('/', auth, checkModulePermission('leads', 'view'), [
     }
     if (req.query.search) {
       const searchTerm = req.query.search.trim();
-      const searchConditions = [
-        { 'contact.firstName': new RegExp(searchTerm, 'i') },
-        { 'contact.lastName': new RegExp(searchTerm, 'i') },
-        { 'contact.email': new RegExp(searchTerm, 'i') },
-        { 'contact.phone': new RegExp(searchTerm, 'i') },
-        { 'leadId': new RegExp(searchTerm, 'i') }
-      ];
+      const searchWords = searchTerm.split(/\s+/).filter(word => word.length > 0);
+      const searchConditions = [];
+
+      // For multi-word searches, handle firstName and lastName separately
+      if (searchWords.length > 1) {
+        // Search for first word in firstName and remaining words in lastName
+        const firstNameSearch = searchWords[0];
+        const lastNameSearch = searchWords.slice(1).join(' ');
+        
+        // Match: firstName contains first word AND lastName contains remaining words
+        searchConditions.push({
+          $and: [
+            { 'contact.firstName': new RegExp(firstNameSearch, 'i') },
+            { 'contact.lastName': new RegExp(lastNameSearch, 'i') }
+          ]
+        });
+        
+        // Also try reverse: lastName contains first word AND firstName contains remaining words
+        searchConditions.push({
+          $and: [
+            { 'contact.lastName': new RegExp(firstNameSearch, 'i') },
+            { 'contact.firstName': new RegExp(lastNameSearch, 'i') }
+          ]
+        });
+        
+        // Also search for full name in either field (for cases where name is stored in one field)
+        searchConditions.push({ 'contact.firstName': new RegExp(searchTerm, 'i') });
+        searchConditions.push({ 'contact.lastName': new RegExp(searchTerm, 'i') });
+      } else {
+        // Single word search - search in firstName or lastName
+        searchConditions.push({ 'contact.firstName': new RegExp(searchTerm, 'i') });
+        searchConditions.push({ 'contact.lastName': new RegExp(searchTerm, 'i') });
+      }
+
+      // Always search in email, phone, and leadId regardless of word count
+      searchConditions.push({ 'contact.email': new RegExp(searchTerm, 'i') });
+      searchConditions.push({ 'contact.phone': new RegExp(searchTerm, 'i') });
+      searchConditions.push({ 'leadId': new RegExp(searchTerm, 'i') });
 
       // Also search by MongoDB _id if the search term looks like an ObjectId
       if (searchTerm.match(/^[0-9a-fA-F]{24}$/)) {
