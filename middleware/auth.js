@@ -68,32 +68,49 @@ const checkModulePermission = (moduleName, action) => {
 
       // Super Admin has all permissions bypass
       if (req.user.role === 'super_admin') {
+        console.log(`Permission check - Super Admin bypass for ${moduleName}.${action}`);
         return next();
       }
 
+      console.log(`Permission check - Role: ${req.user.role}, Module: ${moduleName}, Action: ${action}`);
       const rolePermission = await RolePermission.findOne({ role: req.user.role });
 
       if (!rolePermission) {
-        // Fallback: If no permissions defined, check if role is allowed via static authorize
-        // For now, we'll allow it to continue if it's a known role, but normally we'd deny.
-        // Let's be strict for security.
+        console.log(`Permission check failed - No RolePermission found for role: ${req.user.role}`);
         return res.status(403).json({ message: `Access denied. No module permissions defined for role: ${req.user.role}` });
       }
 
       const modulePerms = rolePermission.permissions[moduleName];
-      if (modulePerms && modulePerms[action]) {
+      console.log(`Permission check - Module permissions for ${moduleName}:`, JSON.stringify(modulePerms, null, 2));
+      
+      if (!modulePerms) {
+        console.log(`Permission check failed - Module ${moduleName} not found in permissions`);
+        return res.status(403).json({
+          message: `Access denied. Module ${moduleName} not found in permissions.`,
+          module: moduleName,
+          action: action
+        });
+      }
+
+      const hasPermission = modulePerms[action];
+      console.log(`Permission check - ${moduleName}.${action} = ${hasPermission} (type: ${typeof hasPermission})`);
+
+      if (hasPermission === true) {
+        console.log(`Permission check passed - Role: ${req.user.role} can ${action} ${moduleName}`);
         return next();
       }
 
-      console.log(`Permission denied - Role: ${req.user.role}, Module: ${moduleName}, Action: ${action}`);
+      console.log(`Permission denied - Role: ${req.user.role}, Module: ${moduleName}, Action: ${action}, Value: ${hasPermission}`);
       return res.status(403).json({
         message: `Access denied. You do not have permission to ${action} ${moduleName}.`,
         module: moduleName,
-        action: action
+        action: action,
+        hasPermission: hasPermission
       });
     } catch (error) {
       console.error('Permission check error:', error);
-      res.status(500).json({ message: 'Server error during permission check' });
+      console.error('Error stack:', error.stack);
+      res.status(500).json({ message: 'Server error during permission check', error: process.env.NODE_ENV === 'development' ? error.message : undefined });
     }
   };
 };
@@ -124,4 +141,70 @@ const optionalAuth = async (req, res, next) => {
   }
 };
 
-module.exports = { auth, authorize, optionalAuth, checkModulePermission };
+/**
+ * Validates per-entry permissions on a document
+ * @param {Object} document - The document (lead, user, etc) to check permissions for
+ * @param {Object} user - The req.user object
+ * @param {String} action - 'view', 'edit', 'delete'
+ * @returns {Object} { allowed: boolean, reason: string }
+ */
+const validateEntryPermission = (document, user, action) => {
+  // Super admin can do anything
+  if (user.role === 'super_admin') {
+    return { allowed: true, reason: 'super_admin_bypass' };
+  }
+
+  // Check per-entry granular permissions
+  const granularPerms = document?.entryPermissions?.[user.role];
+  
+  // If entry has explicit false, deny
+  if (granularPerms && granularPerms[action] === false) {
+    return { allowed: false, reason: 'entry_explicit_deny' };
+  }
+
+  // If entry has explicit true, allow
+  if (granularPerms && granularPerms[action] === true) {
+    return { allowed: true, reason: 'entry_explicit_allow' };
+  }
+
+  // Otherwise, module-level permission has already been checked by middleware
+  // If user reached the route handler, module permission already passed
+  return { allowed: true, reason: 'module_permission_passed' };
+};
+
+/**
+ * Validates agency isolation for a document
+ * Ensures users can only access documents belonging to their agency
+ */
+const validateAgencyIsolation = (document, user) => {
+  // Super admin can access all
+  if (user.role === 'super_admin') {
+    return { allowed: true, reason: 'super_admin_bypass' };
+  }
+
+  // For agency_admin and agents - must belong to user's agency
+  if (!user.agency) {
+    return { allowed: false, reason: 'user_no_agency' };
+  }
+
+  const docAgencyId = document?.agency?._id 
+    ? document.agency._id.toString() 
+    : (document?.agency?.toString() || document?.agency || null);
+
+  const userAgencyId = user.agency?.toString ? user.agency.toString() : user.agency;
+
+  if (docAgencyId !== userAgencyId) {
+    return { allowed: false, reason: 'agency_mismatch', documentAgency: docAgencyId, userAgency: userAgencyId };
+  }
+
+  return { allowed: true, reason: 'agency_match' };
+};
+
+module.exports = { 
+  auth, 
+  authorize, 
+  optionalAuth, 
+  checkModulePermission,
+  validateEntryPermission,
+  validateAgencyIsolation
+};

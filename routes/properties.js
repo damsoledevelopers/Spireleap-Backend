@@ -1078,7 +1078,7 @@ router.post('/compare', optionalAuth, [
 // @access  Private (Super Admin, Agency Admin)
 router.put('/bulk', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('properties', 'edit'),
   body('propertyIds').isArray().withMessage('Property IDs array is required'),
   body('propertyIds.*').isMongoId().withMessage('Invalid property ID'),
   body('updates').isObject().withMessage('Updates object is required')
@@ -1115,7 +1115,7 @@ router.put('/bulk', [
 // @access  Private (Super Admin, Agency Admin)
 router.delete('/bulk', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('properties', 'delete'),
   body('propertyIds').isArray().withMessage('Property IDs array is required'),
   body('propertyIds.*').isMongoId().withMessage('Invalid property ID')
 ], async (req, res) => {

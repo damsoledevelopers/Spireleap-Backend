@@ -375,7 +375,48 @@ const leadSchema = new mongoose.Schema({
       edit: { type: Boolean, default: true },
       delete: { type: Boolean, default: false }
     }
-  }
+  },
+  // Activity Log / Audit Trail
+  activityLog: [{
+    action: {
+      type: String,
+      required: true,
+      enum: [
+        'status_change',
+        'priority_change',
+        'assignment_change',
+        'note_added',
+        'communication_added',
+        'task_added',
+        'reminder_added',
+        'document_uploaded',
+        'site_visit_scheduled',
+        'site_visit_completed',
+        'lead_created',
+        'lead_updated',
+        'merged',
+        'document_deleted',
+        'task_updated',
+        'task_deleted',
+        'reminder_updated',
+        'reminder_deleted'
+      ]
+    },
+    details: {
+      field: String,
+      oldValue: mongoose.Schema.Types.Mixed,
+      newValue: mongoose.Schema.Types.Mixed,
+      description: String
+    },
+    performedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    },
+    timestamp: {
+      type: Date,
+      default: Date.now
+    }
+  }]
 }, {
   timestamps: true
 });

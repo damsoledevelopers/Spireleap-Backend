@@ -3,7 +3,7 @@ const { body, validationResult } = require('express-validator');
 const mongoose = require('mongoose');
 const Lead = require('../models/Lead');
 const User = require('../models/User');
-const { auth, authorize } = require('../middleware/auth');
+const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 const activityService = require('../services/activityService');
 
 const router = express.Router();
@@ -11,7 +11,7 @@ const router = express.Router();
 // @route   GET /api/gdpr/export/:leadId
 // @desc    Export lead data (GDPR Right to Data Portability)
 // @access  Private
-router.get('/export/:leadId', auth, authorize('super_admin', 'agency_admin', 'agent'), async (req, res) => {
+router.get('/export/:leadId', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.leadId)
       .populate('property', 'title slug')
@@ -117,7 +117,7 @@ router.get('/export/:leadId', auth, authorize('super_admin', 'agency_admin', 'ag
 // @route   DELETE /api/gdpr/delete/:leadId
 // @desc    Delete lead data (GDPR Right to be Forgotten)
 // @access  Private (Super Admin, Agency Admin)
-router.delete('/delete/:leadId', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.delete('/delete/:leadId', auth, checkModulePermission('leads', 'delete'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.leadId);
     if (!lead) {
@@ -187,7 +187,7 @@ router.delete('/delete/:leadId', auth, authorize('super_admin', 'agency_admin'),
 // @access  Private
 router.post('/consent/:leadId', [
   auth,
-  authorize('super_admin', 'agency_admin', 'agent'),
+  checkModulePermission('leads', 'edit'),
   body('consentType').isIn(['marketing', 'data_processing', 'communication']).withMessage('Valid consent type is required'),
   body('consented').isBoolean().withMessage('Consented must be boolean')
 ], async (req, res) => {
@@ -238,7 +238,7 @@ router.post('/consent/:leadId', [
 // @route   GET /api/gdpr/consent/:leadId
 // @desc    Get GDPR consent status
 // @access  Private
-router.get('/consent/:leadId', auth, authorize('super_admin', 'agency_admin', 'agent'), async (req, res) => {
+router.get('/consent/:leadId', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.leadId).select('gdprConsent contact');
     if (!lead) {

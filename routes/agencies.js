@@ -10,10 +10,7 @@ const router = express.Router();
 // @route   GET /api/agencies
 // @desc    Get all agencies
 // @access  Private (Super Admin, Agency Admin, Staff)
-router.get('/', auth, (req, res, next) => {
-  if (req.user.role === 'staff') return next();
-  return checkModulePermission('agencies', 'view')(req, res, next);
-}, async (req, res) => {
+router.get('/', auth, checkModulePermission('agencies', 'view'), async (req, res) => {
   try {
     const filter = {};
     if (req.user.role === 'agency_admin') {
@@ -75,8 +72,8 @@ router.get('/:id', auth, checkModulePermission('agencies', 'view'), async (req, 
       return res.status(404).json({ message: 'Agency not found' });
     }
 
-    // Check permissions
-    if (req.user.role === 'agency_admin' && agency._id.toString() !== req.user.agency) {
+    // Check permissions - agency_admin can only access their own agency
+    if (req.user.role === 'agency_admin' && agency._id.toString() !== req.user.agency?.toString()) {
       return res.status(403).json({ message: 'Access denied' });
     }
 

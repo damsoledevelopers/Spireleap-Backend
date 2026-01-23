@@ -151,7 +151,8 @@ app.use('*', (req, res) => {
 // Socket.IO
 // --------------------
 const { initializeSocket } = require('./socket');
-initializeSocket(server);
+const io = initializeSocket(server);
+
 
 // --------------------
 // Start Server

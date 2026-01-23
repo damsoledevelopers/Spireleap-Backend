@@ -4,7 +4,7 @@ const mongoose = require('mongoose');
 const Lead = require('../models/Lead');
 const Transaction = require('../models/Transaction');
 const Property = require('../models/Property');
-const { auth, authorize } = require('../middleware/auth');
+const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 const activityService = require('../services/activityService');
 
 const router = express.Router();
@@ -14,7 +14,7 @@ const router = express.Router();
 // @access  Private (Super Admin, Agency Admin)
 router.post('/sync-lead', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('leads', 'edit'),
   body('leadId').isMongoId().withMessage('Valid lead ID is required'),
   body('erpSystem').isIn(['sap', 'oracle', 'tally', 'quickbooks', 'xero', 'custom']).withMessage('Valid ERP system is required')
 ], async (req, res) => {
@@ -104,7 +104,7 @@ router.post('/sync-lead', [
 // @access  Private (Super Admin, Agency Admin)
 router.post('/sync-transaction', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('leads', 'edit'),
   body('transactionId').isMongoId().withMessage('Valid transaction ID is required'),
   body('erpSystem').isIn(['sap', 'oracle', 'tally', 'quickbooks', 'xero', 'custom']).withMessage('Valid ERP system is required')
 ], async (req, res) => {
@@ -173,7 +173,7 @@ router.post('/sync-transaction', [
 // @route   GET /api/erp/sync-status/:leadId
 // @desc    Get ERP sync status for a lead
 // @access  Private
-router.get('/sync-status/:leadId', auth, authorize('super_admin', 'agency_admin', 'agent'), async (req, res) => {
+router.get('/sync-status/:leadId', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.leadId).select('erpSync leadId');
     if (!lead) {

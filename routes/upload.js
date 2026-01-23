@@ -2,7 +2,7 @@ const express = require('express');
 const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
-const { auth, authorize } = require('../middleware/auth');
+const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 const { uploadSingle, uploadMultiple, uploadFields, deleteFile, getFileUrl, uploadDirs } = require('../middleware/upload');
 
 const router = express.Router();
@@ -89,7 +89,7 @@ router.post('/', auth, (req, res) => {
 // @access  Private (Agency Admin, Agent)
 router.post('/property-image', [
   auth,
-  authorize('super_admin', 'agency_admin', 'agent'),
+  checkModulePermission('properties', 'edit'),
   uploadSingle('image')
 ], async (req, res) => {
   try {
@@ -121,7 +121,7 @@ router.post('/property-image', [
 // @access  Private (Agency Admin, Agent)
 router.post('/property-images', [
   auth,
-  authorize('super_admin', 'agency_admin', 'agent'),
+  checkModulePermission('properties', 'edit'),
   uploadMultiple('images', 10)
 ], async (req, res) => {
   try {
@@ -233,7 +233,7 @@ router.delete('/:filename', auth, async (req, res) => {
 // @access  Private (Agency Admin, Agent)
 router.post('/property-documents', [
   auth,
-  authorize('super_admin', 'agency_admin', 'agent')
+  checkModulePermission('properties', 'edit')
 ], (req, res) => {
   const storage = multer.diskStorage({
     destination: (req, file, cb) => {
@@ -314,7 +314,7 @@ router.post('/property-documents', [
 // @access  Private (Super Admin, Agency Admin, Agent)
 router.post('/lead-documents', [
   auth,
-  authorize('super_admin', 'agency_admin', 'agent')
+  checkModulePermission('leads', 'edit')
 ], (req, res) => {
   const storage = multer.diskStorage({
     destination: (req, file, cb) => {

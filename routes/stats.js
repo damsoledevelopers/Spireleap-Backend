@@ -11,7 +11,7 @@ const router = express.Router();
 // @route   GET /api/stats/dashboard
 // @desc    Get optimized dashboard statistics
 // @access  Private
-router.get('/dashboard', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const leadFilter = {};
     const propertyFilter = {};

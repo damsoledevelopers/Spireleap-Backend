@@ -5,7 +5,7 @@ const Lead = require('../models/Lead');
 const Property = require('../models/Property');
 const User = require('../models/User');
 const Agency = require('../models/Agency');
-const { auth, authorize, optionalAuth, checkModulePermission } = require('../middleware/auth');
+const { auth, authorize, optionalAuth, checkModulePermission, validateEntryPermission, validateAgencyIsolation } = require('../middleware/auth');
 const emailService = require('../services/emailService');
 const smsService = require('../services/smsService');
 const leadAssignmentService = require('../services/leadAssignmentService');
@@ -193,7 +193,7 @@ router.get('/', auth, checkModulePermission('leads', 'view'), [
         // Search for first word in firstName and remaining words in lastName
         const firstNameSearch = searchWords[0];
         const lastNameSearch = searchWords.slice(1).join(' ');
-        
+
         // Match: firstName contains first word AND lastName contains remaining words
         searchConditions.push({
           $and: [
@@ -201,7 +201,7 @@ router.get('/', auth, checkModulePermission('leads', 'view'), [
             { 'contact.lastName': new RegExp(lastNameSearch, 'i') }
           ]
         });
-        
+
         // Also try reverse: lastName contains first word AND firstName contains remaining words
         searchConditions.push({
           $and: [
@@ -209,7 +209,7 @@ router.get('/', auth, checkModulePermission('leads', 'view'), [
             { 'contact.firstName': new RegExp(lastNameSearch, 'i') }
           ]
         });
-        
+
         // Also search for full name in either field (for cases where name is stored in one field)
         searchConditions.push({ 'contact.firstName': new RegExp(searchTerm, 'i') });
         searchConditions.push({ 'contact.lastName': new RegExp(searchTerm, 'i') });
@@ -327,7 +327,7 @@ router.get('/', auth, checkModulePermission('leads', 'view'), [
 // @route   GET /api/leads/:id
 // @desc    Get single lead
 // @access  Private
-router.get('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.get('/:id', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id)
       .populate('property', 'title slug images price location')
@@ -340,7 +340,8 @@ router.get('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
       .populate('tasks.assignedTo', 'firstName lastName')
       .populate('tasks.createdBy', 'firstName lastName')
       .populate('reminders.createdBy', 'firstName lastName')
-      .populate('documents.uploadedBy', 'firstName lastName');
+      .populate('documents.uploadedBy', 'firstName lastName')
+      .populate('activityLog.performedBy', 'firstName lastName');
 
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found' });
@@ -395,10 +396,134 @@ router.get('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
   }
 });
 
+// @route   GET /api/leads/:id/inquiries
+// @desc    Get inquiries/history for the same customer (by email/phone), excluding current lead by default
+// @access  Private
+router.get(
+  '/:id/inquiries',
+  auth,
+  checkModulePermission('leads', 'view'),
+  [
+    query('page').optional().isInt({ min: 1 }),
+    query('limit').optional().isInt({ min: 1, max: 500 }),
+    query('includeSelf').optional().isBoolean().toBoolean()
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 50;
+      const skip = (page - 1) * limit;
+      const includeSelf = req.query.includeSelf === true;
+
+      const baseLead = await Lead.findById(req.params.id)
+        .populate('agency', 'name logo')
+        .populate('assignedAgent', 'firstName lastName email phone profileImage agentInfo');
+
+      if (!baseLead) {
+        return res.status(404).json({ message: 'Lead not found' });
+      }
+
+      // Permission checks (same logic as GET /api/leads/:id)
+      const leadAgencyId = baseLead.agency?._id
+        ? baseLead.agency._id.toString()
+        : (baseLead.agency?.toString() || baseLead.agency);
+
+      const userAgencyId = req.user.agency?._id
+        ? req.user.agency._id.toString()
+        : (req.user.agency?.toString() || req.user.agency);
+
+      if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
+        return res.status(403).json({ message: 'Access denied. You can only view leads from your agency.' });
+      }
+
+      if (req.user.role === 'agent') {
+        const assignedAgentId = baseLead.assignedAgent?._id
+          ? baseLead.assignedAgent._id.toString()
+          : (baseLead.assignedAgent?.toString() || baseLead.assignedAgent);
+
+        if (assignedAgentId && assignedAgentId !== req.user.id) {
+          return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+        }
+
+        if (leadAgencyId !== userAgencyId) {
+          return res.status(403).json({ message: 'Access denied. This lead is not from your agency.' });
+        }
+      }
+
+      // Build customer match filter (email/phone). Stored contact may be encrypted in DB,
+      // but we can still match on raw stored values of the baseLead document.
+      const matchOr = [];
+      if (baseLead.contact?.email) matchOr.push({ 'contact.email': baseLead.contact.email });
+      if (baseLead.contact?.phone) matchOr.push({ 'contact.phone': baseLead.contact.phone });
+
+      if (matchOr.length === 0) {
+        return res.json({
+          inquiries: [],
+          pagination: { page, limit, total: 0, pages: 0 }
+        });
+      }
+
+      const filter = { $or: matchOr };
+      if (!includeSelf) {
+        filter._id = { $ne: baseLead._id };
+      }
+
+      const inquiries = await Lead.find(filter)
+        .populate({
+          path: 'property',
+          select: 'title slug images price location agent',
+          populate: { path: 'agent', select: 'firstName lastName profileImage' }
+        })
+        .populate('agency', 'name logo')
+        .populate('assignedAgent', 'firstName lastName email profileImage')
+        .sort('-createdAt')
+        .skip(skip)
+        .limit(limit);
+
+      const total = await Lead.countDocuments(filter);
+
+      const decrypted = inquiries.map(lead => {
+        const leadObj = lead.toObject();
+        if (leadObj.contact) {
+          leadObj.contact = encryptionService.decryptLeadContact(leadObj.contact);
+        }
+        normalizeLeadData(leadObj);
+        return leadObj;
+      });
+
+      // De-dupe by _id (defensive)
+      const uniqueById = new Map();
+      decrypted.forEach((inq) => {
+        const id = (inq?._id || '').toString();
+        if (!id) return;
+        if (!uniqueById.has(id)) uniqueById.set(id, inq);
+      });
+
+      res.json({
+        inquiries: Array.from(uniqueById.values()),
+        pagination: {
+          page,
+          limit,
+          total,
+          pages: Math.ceil(total / limit)
+        }
+      });
+    } catch (error) {
+      console.error('Get lead inquiries error:', error);
+      res.status(500).json({ message: 'Server error' });
+    }
+  }
+);
+
 // @route   POST /api/leads
 // @desc    Create new lead (from website form or manually)
 // @access  Public (website) / Private (manual)
-router.post('/', optionalAuth, [
+router.post('/', auth, checkModulePermission('leads', 'create'), [
   body('contact.firstName').trim().notEmpty().withMessage('First name is required'),
   body('contact.lastName').trim().notEmpty().withMessage('Last name is required'),
   body('contact.email').isEmail().withMessage('Valid email is required'),
@@ -413,39 +538,61 @@ router.post('/', optionalAuth, [
       });
     }
 
-    // If authenticated, use user's agency, otherwise require agency
+    // REQUIRED: User must be authenticated to create leads
+    if (!req.user) {
+      return res.status(401).json({ message: 'Authentication required to create leads' });
+    }
+
+    // SECURITY: Agency admin and agents can only create leads for their own agency
     let agencyId = req.body.agency;
-    if (req.user && req.user.role !== 'super_admin') {
-      agencyId = req.user.agency || req.body.agency;
-      // If user doesn't have an agency, try to use default agency as fallback
-      if (!agencyId) {
-        const defaultAgency = await Agency.findOne({ isActive: true }).sort({ createdAt: 1 });
-        if (!defaultAgency) {
-          return res.status(400).json({
-            message: 'Your account is not associated with an agency and no default agency is available. Please contact the administrator to assign an agency to your account.',
-            code: 'AGENCY_REQUIRED'
-          });
-        }
-        agencyId = defaultAgency._id;
+
+    if (req.user.role === 'agency_admin' || req.user.role === 'agent') {
+      // Must have an agency assigned
+      if (!req.user.agency) {
+        return res.status(403).json({
+          message: 'Your account is not associated with an agency. Please contact the administrator.',
+          code: 'NO_AGENCY_ASSIGNED'
+        });
       }
-    } else if (req.user && req.user.role === 'super_admin') {
-      // Super admin must provide agency in request body
-      if (!agencyId) {
-        return res.status(400).json({ message: 'Agency is required for super admin. Please select an agency.' });
+
+      // If trying to create for different agency, block
+      if (agencyId && agencyId !== req.user.agency) {
+        return res.status(403).json({
+          message: 'You can only create leads for your own agency',
+          code: 'AGENCY_MISMATCH'
+        });
       }
-    } else {
-      // Not authenticated - try to use provided agency, or get first active agency as default
+
+      // Force agency to their own
+      agencyId = req.user.agency;
+    } else if (req.user.role === 'super_admin') {
+      // Super admin must specify agency
       if (!agencyId) {
-        // For public contact forms, use the first active agency as default
-        const defaultAgency = await Agency.findOne({ isActive: true }).sort({ createdAt: 1 });
-        if (!defaultAgency) {
-          return res.status(400).json({
-            message: 'No active agency found. Please contact the administrator.',
-            code: 'NO_AGENCY_AVAILABLE'
-          });
-        }
-        agencyId = defaultAgency._id;
+        return res.status(400).json({ message: 'Agency is required for super admin' });
       }
+    } else if (req.user.role === 'staff' || req.user.role === 'user') {
+      // Staff/user might not have agency - use their agency or provided agency
+      if (!agencyId && req.user.agency) {
+        agencyId = req.user.agency;
+      }
+    }
+
+    // If no agency determined, try default
+    if (!agencyId) {
+      const defaultAgency = await Agency.findOne({ isActive: true }).sort({ createdAt: 1 });
+      if (!defaultAgency) {
+        return res.status(400).json({
+          message: 'No active agency found. Please contact the administrator.',
+          code: 'NO_AGENCY_AVAILABLE'
+        });
+      }
+      agencyId = defaultAgency._id;
+    }
+
+    // Validate the agency exists
+    const agency = await Agency.findById(agencyId);
+    if (!agency) {
+      return res.status(400).json({ message: 'Selected agency does not exist' });
     }
 
     // Check for duplicate leads (by email or phone)
@@ -466,10 +613,24 @@ router.post('/', optionalAuth, [
     // Auto-assign agent if not provided and auto-assignment is enabled
     let assignedAgentId = req.body.assignedAgent || null;
     if (!assignedAgentId) {
-      const agency = await Agency.findById(agencyId);
       if (agency?.settings?.autoAssignLeads) {
         const assignmentMethod = agency.settings.assignmentMethod || 'round_robin';
         assignedAgentId = await leadAssignmentService.autoAssignLead(agencyId, assignmentMethod, req.body);
+      }
+    }
+
+    // SECURITY: Validate assigned agent is from same agency
+    if (assignedAgentId) {
+      const assignedAgent = await User.findById(assignedAgentId);
+      if (!assignedAgent) {
+        return res.status(400).json({ message: 'Assigned agent not found' });
+      }
+      // Agent must be from same agency (or be from an agency if no agency filter)
+      if (assignedAgent.agency && assignedAgent.agency.toString() !== agencyId.toString()) {
+        return res.status(403).json({
+          message: 'Cannot assign agents from different agencies',
+          code: 'AGENT_AGENCY_MISMATCH'
+        });
       }
     }
 
@@ -511,6 +672,12 @@ router.post('/', optionalAuth, [
       firstContactSla: 3600000, // 1 hour default
       firstContactStatus: 'pending'
     };
+
+    lead.activityLog.push({
+      action: 'lead_created',
+      details: { description: 'Lead created' },
+      performedBy: req.user.id
+    });
 
     await lead.save();
 
@@ -627,43 +794,39 @@ router.put('/:id', auth, checkModulePermission('leads', 'edit'), async (req, res
       return res.status(404).json({ message: 'Lead not found' });
     }
 
-    // Check permissions
-    // Get lead agency ID (handle both populated object and ID string)
-    const leadAgencyId = lead.agency?._id
-      ? lead.agency._id.toString()
-      : (lead.agency?.toString() || lead.agency);
+    // SECURITY: Validate per-entry permissions
+    const entryPermCheck = validateEntryPermission(lead, req.user, 'edit');
+    if (!entryPermCheck.allowed) {
+      console.log(`Update blocked - Entry permission denied: ${entryPermCheck.reason}, Lead: ${req.params.id}, Role: ${req.user.role}`);
+      return res.status(403).json({
+        message: 'Access denied by entry-level restriction',
+        reason: entryPermCheck.reason
+      });
+    }
 
-    // Get user agency ID (handle both populated object and ID string)
-    const userAgencyId = req.user.agency?._id
-      ? req.user.agency._id.toString()
-      : (req.user.agency?.toString() || req.user.agency);
+    // SECURITY: Validate agency isolation
+    const agencyCheck = validateAgencyIsolation(lead, req.user);
+    if (!agencyCheck.allowed) {
+      console.log(`Update blocked - Agency isolation failed: ${agencyCheck.reason}, Lead: ${req.params.id}`);
+      return res.status(403).json({
+        message: 'Access denied. You can only update leads from your agency.',
+        reason: agencyCheck.reason
+      });
+    }
 
-    // Granular Per-Entry Permission Overrides
-    const granularPerms = lead.entryPermissions?.[req.user.role];
-    if (granularPerms && granularPerms.edit === true) {
-      // Explicitly allowed by Super Admin override
-    } else if (granularPerms && granularPerms.edit === false) {
-      return res.status(403).json({ message: 'Access denied by per-entry restriction' });
-    } else {
-      // Legacy/Fallback Logic:
-      // Agency admin and staff can only update leads from their agency
-      if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
-        return res.status(403).json({ message: 'Access denied. You can only update leads from your agency.' });
-      }
+    // SECURITY: Agent can only update leads assigned to them
+    if (req.user.role === 'agent') {
+      const agentId = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
+      const assignedAgentId = lead.assignedAgent?._id
+        ? lead.assignedAgent._id.toString()
+        : (lead.assignedAgent?.toString() || lead.assignedAgent);
 
-      // Agent can only update leads assigned to them or managed properties (fallback)
-      if (req.user.role === 'agent') {
-        const agentId = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
-        const assignedAgentId = lead.assignedAgent?._id
-          ? lead.assignedAgent._id.toString()
-          : (lead.assignedAgent?.toString() || lead.assignedAgent);
+      // Check assigned agent or property ownership
+      const isPropertyManager = await Property.exists({ _id: lead.property, agent: agentId });
 
-        // Check assigned agent or property ownership (re-using property check)
-        const isPropertyManager = await Property.exists({ _id: lead.property, agent: agentId });
-
-        if (assignedAgentId !== req.user.id && !isPropertyManager) {
-          return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
-        }
+      if (assignedAgentId !== req.user.id && !isPropertyManager) {
+        console.log(`Update blocked - Agent not assigned to lead: ${req.params.id}, Agent: ${req.user.id}, Assigned to: ${assignedAgentId}`);
+        return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
       }
     }
 
@@ -671,6 +834,50 @@ router.put('/:id', auth, checkModulePermission('leads', 'edit'), async (req, res
     const previousStatus = lead.status;
     const previousPriority = lead.priority;
     const previousAssignedAgent = lead.assignedAgent;
+
+    // Activity Log Tracking
+    const activityLogs = [];
+
+    // Track Status Change
+    if (req.body.status && req.body.status !== previousStatus) {
+      activityLogs.push({
+        action: 'status_change',
+        details: {
+          field: 'status',
+          oldValue: previousStatus,
+          newValue: req.body.status,
+          description: `Status changed from ${previousStatus} to ${req.body.status}`
+        },
+        performedBy: req.user.id
+      });
+    }
+
+    // Track Priority Change
+    if (req.body.priority) {
+      const newPriority = getNormalizedPriority(req.body.priority);
+      if (newPriority !== previousPriority) {
+        activityLogs.push({
+          action: 'priority_change',
+          details: {
+            field: 'priority',
+            oldValue: previousPriority,
+            newValue: newPriority,
+            description: `Priority changed from ${previousPriority} to ${newPriority}`
+          },
+          performedBy: req.user.id
+        });
+      }
+    }
+
+    // Track General Updates (if not specific status/priority)
+    if (activityLogs.length === 0 && Object.keys(req.body).length > 0) {
+      // Optional: Log generic update if needed, but keeping it clean for now
+      // Or we can log specific important field changes here
+    }
+
+    if (activityLogs.length > 0) {
+      lead.activityLog.push(...activityLogs);
+    }
 
     // Normalize priority and source if provided
     if (req.body.hasOwnProperty('priority')) {
@@ -843,7 +1050,7 @@ router.put('/:id', auth, checkModulePermission('leads', 'edit'), async (req, res
 // @route   POST /api/leads/:id/notes
 // @desc    Add note to lead
 // @access  Private
-router.post('/:id/notes', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), [
+router.post('/:id/notes', auth, checkModulePermission('leads', 'edit'), [
   body('note').trim().notEmpty().withMessage('Note is required')
 ], async (req, res) => {
   try {
@@ -889,6 +1096,12 @@ router.post('/:id/notes', auth, authorize('super_admin', 'agency_admin', 'agent'
       createdBy: req.user.id
     });
 
+    lead.activityLog.push({
+      action: 'note_added',
+      details: { description: 'Note added' },
+      performedBy: req.user.id
+    });
+
     await lead.save();
     res.json({ lead });
   } catch (error) {
@@ -900,7 +1113,7 @@ router.post('/:id/notes', auth, authorize('super_admin', 'agency_admin', 'agent'
 // @route   POST /api/leads/:id/communications
 // @desc    Add communication to lead
 // @access  Private
-router.post('/:id/communications', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), [
+router.post('/:id/communications', auth, checkModulePermission('leads', 'edit'), [
   body('type').isIn(['call', 'email', 'sms', 'meeting', 'note']).withMessage('Valid communication type is required'),
   body('message').trim().notEmpty().withMessage('Message is required')
 ], async (req, res) => {
@@ -949,6 +1162,14 @@ router.post('/:id/communications', auth, authorize('super_admin', 'agency_admin'
 
     lead.communications.push(communication);
 
+    lead.activityLog.push({
+      action: 'communication_added',
+      details: {
+        description: `${req.body.type.charAt(0).toUpperCase() + req.body.type.slice(1)} logged: ${req.body.subject || 'No subject'}`
+      },
+      performedBy: req.user.id
+    });
+
     // Track SLA - mark first contact if this is the first communication
     if (!lead.sla.firstContactAt && req.body.type !== 'note') {
       lead.sla.firstContactAt = new Date();
@@ -996,7 +1217,7 @@ router.post('/:id/communications', auth, authorize('super_admin', 'agency_admin'
 // @route   POST /api/leads/:id/tasks
 // @desc    Add task to lead
 // @access  Private
-router.post('/:id/tasks', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), [
+router.post('/:id/tasks', auth, checkModulePermission('leads', 'edit'), [
   body('title').trim().notEmpty().withMessage('Task title is required')
 ], async (req, res) => {
   try {
@@ -1042,6 +1263,12 @@ router.post('/:id/tasks', auth, authorize('super_admin', 'agency_admin', 'agent'
       createdBy: req.user.id
     });
 
+    lead.activityLog.push({
+      action: 'task_added',
+      details: { description: `Task created: ${req.body.title}` },
+      performedBy: req.user.id
+    });
+
     await lead.save();
 
     const updatedLead = await Lead.findById(lead._id)
@@ -1058,7 +1285,7 @@ router.post('/:id/tasks', auth, authorize('super_admin', 'agency_admin', 'agent'
 // @route   PUT /api/leads/:id/tasks/:taskId
 // @desc    Update task
 // @access  Private
-router.put('/:id/tasks/:taskId', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.put('/:id/tasks/:taskId', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
@@ -1129,7 +1356,7 @@ router.put('/:id/tasks/:taskId', auth, authorize('super_admin', 'agency_admin', 
 // @route   DELETE /api/leads/:id/tasks/:taskId
 // @desc    Delete task
 // @access  Private
-router.delete('/:id/tasks/:taskId', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.delete('/:id/tasks/:taskId', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
@@ -1182,7 +1409,7 @@ router.delete('/:id/tasks/:taskId', auth, authorize('super_admin', 'agency_admin
 // @route   POST /api/leads/:id/reminders
 // @desc    Add reminder to lead
 // @access  Private
-router.post('/:id/reminders', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), [
+router.post('/:id/reminders', auth, checkModulePermission('leads', 'edit'), [
   body('title').trim().notEmpty().withMessage('Reminder title is required'),
   body('reminderDate').isISO8601().withMessage('Valid reminder date is required')
 ], async (req, res) => {
@@ -1247,6 +1474,12 @@ router.post('/:id/reminders', auth, authorize('super_admin', 'agency_admin', 'ag
       createdBy: req.user.id
     });
 
+    lead.activityLog.push({
+      action: 'reminder_added',
+      details: { description: `Reminder set: ${req.body.title}` },
+      performedBy: req.user.id
+    });
+
     await lead.save();
 
     const updatedLead = await Lead.findById(lead._id)
@@ -1268,7 +1501,7 @@ router.post('/:id/reminders', auth, authorize('super_admin', 'agency_admin', 'ag
 // @route   PUT /api/leads/:id/reminders/:reminderId
 // @desc    Update reminder
 // @access  Private
-router.put('/:id/reminders/:reminderId', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.put('/:id/reminders/:reminderId', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
@@ -1330,7 +1563,7 @@ router.put('/:id/reminders/:reminderId', auth, authorize('super_admin', 'agency_
 // @route   DELETE /api/leads/:id/reminders/:reminderId
 // @desc    Delete reminder
 // @access  Private
-router.delete('/:id/reminders/:reminderId', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.delete('/:id/reminders/:reminderId', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
@@ -1376,7 +1609,7 @@ router.delete('/:id/reminders/:reminderId', auth, authorize('super_admin', 'agen
 // @route   PUT /api/leads/:id/assign
 // @desc    Assign lead to agent
 // @access  Private
-router.put('/:id/assign', auth, authorize('super_admin', 'agency_admin'), [
+router.put('/:id/assign', auth, checkModulePermission('leads', 'edit'), [
   body('assignedAgent').notEmpty().withMessage('Agent ID is required')
 ], async (req, res) => {
   try {
@@ -1394,9 +1627,26 @@ router.put('/:id/assign', auth, authorize('super_admin', 'agency_admin'), [
       return res.status(404).json({ message: 'Agent not found' });
     }
 
+    // Capture previous assignment
+    const previousAgentId = lead.assignedAgent;
+
     // Update lead assignment fields
     lead.assignedAgent = req.body.assignedAgent;
     lead.assignedBy = req.user.id;
+
+    // Log Assignment Change
+    if (String(previousAgentId) !== String(req.body.assignedAgent)) {
+      lead.activityLog.push({
+        action: 'assignment_change',
+        details: {
+          field: 'assignedAgent',
+          oldValue: previousAgentId,
+          newValue: req.body.assignedAgent,
+          description: 'Lead manually assigned to a new agent'
+        },
+        performedBy: req.user.id
+      });
+    }
 
     // Set reporting manager (if provided, otherwise use current user if they're a manager)
     if (req.body.reportingManager) {
@@ -1470,7 +1720,7 @@ router.put('/:id/assign', auth, authorize('super_admin', 'agency_admin'), [
 // @route   POST /api/leads/:id/auto-assign
 // @desc    Auto-assign lead using specified method
 // @access  Private (Super Admin, Agency Admin)
-router.post('/:id/auto-assign', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.post('/:id/auto-assign', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
   try {
     // Default to round_robin if not provided
     const assignmentMethod = req.body.assignmentMethod || 'round_robin';
@@ -1559,6 +1809,16 @@ router.post('/:id/auto-assign', auth, authorize('super_admin', 'agency_admin'), 
     lead.assignedAgent = assignedAgentId;
     lead.assignedBy = req.user.id;
 
+    lead.activityLog.push({
+      action: 'assignment_change',
+      details: {
+        field: 'assignedAgent',
+        newValue: assignedAgentId,
+        description: `Lead auto-assigned via ${assignmentMethod}`
+      },
+      performedBy: req.user.id
+    });
+
     // Set reporting manager and team
     const agent = await User.findById(assignedAgentId);
     if (agent) {
@@ -1619,7 +1879,7 @@ router.post('/:id/auto-assign', auth, authorize('super_admin', 'agency_admin'), 
 // @route   POST /api/leads/:id/re-score
 // @desc    Re-score a lead
 // @access  Private (Super Admin, Agency Admin, Agent)
-router.post('/:id/re-score', auth, authorize('super_admin', 'agency_admin', 'agent'), async (req, res) => {
+router.post('/:id/re-score', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
@@ -1660,7 +1920,7 @@ router.post('/:id/re-score', auth, authorize('super_admin', 'agency_admin', 'age
 // @route   POST /api/leads/:id/merge
 // @desc    Merge lead with another lead
 // @access  Private (Super Admin, Agency Admin)
-router.post('/:id/merge', auth, authorize('super_admin', 'agency_admin'), [
+router.post('/:id/merge', auth, checkModulePermission('leads', 'edit'), [
   body('targetLeadId').isMongoId().withMessage('Valid target lead ID is required')
 ], async (req, res) => {
   try {
@@ -1736,6 +1996,7 @@ router.post('/:id/merge', auth, authorize('super_admin', 'agency_admin'), [
   }
 });
 
+
 // @route   GET /api/leads/:id/duplicates
 // @desc    Find duplicate leads
 // @access  Private
@@ -1765,43 +2026,49 @@ router.get('/:id/duplicates', auth, async (req, res) => {
   }
 });
 
-router.delete('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.delete('/:id', auth, checkModulePermission('leads', 'delete'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found' });
     }
 
-    // Granular Per-Entry Permission Overrides
-    const granularPerms = lead.entryPermissions?.[req.user.role];
-    if (granularPerms && granularPerms.delete === true) {
-      // Explicitly allowed by Super Admin override
-    } else if (granularPerms && granularPerms.delete === false) {
-      return res.status(403).json({ message: 'Access denied by per-entry restriction' });
-    } else {
-      // Fallback Logic
-      if (req.user.role === 'agency_admin' && lead.agency.toString() !== req.user.agency) {
-        return res.status(403).json({ message: 'Access denied' });
-      }
-
-      // Staff and Agents don't have global delete permission usually, so we deny if no override
-      if (req.user.role === 'agent' || req.user.role === 'staff') {
-        return res.status(403).json({ message: 'Access denied. You do not have permission to delete this lead.' });
-      }
+    // Validate per-entry permissions
+    const entryPermCheck = validateEntryPermission(lead, req.user, 'delete');
+    if (!entryPermCheck.allowed) {
+      console.log(`Delete blocked - Entry permission denied: ${entryPermCheck.reason}, Lead: ${req.params.id}, Role: ${req.user.role}`);
+      return res.status(403).json({
+        message: 'Access denied by entry-level restriction',
+        reason: entryPermCheck.reason
+      });
     }
 
+    // Validate agency isolation
+    const agencyCheck = validateAgencyIsolation(lead, req.user);
+    if (!agencyCheck.allowed) {
+      console.log(`Delete blocked - Agency isolation failed: ${agencyCheck.reason}, Lead: ${req.params.id}, User Agency: ${agencyCheck.userAgency}, Doc Agency: ${agencyCheck.documentAgency}`);
+      return res.status(403).json({
+        message: 'Access denied. You can only delete leads from your agency.',
+        reason: agencyCheck.reason
+      });
+    }
+
+    // All permission checks passed
+    console.log(`Deleting lead ${req.params.id} - User: ${req.user.id}, Role: ${req.user.role}, Agency: ${req.user.agency}`);
     await Lead.findByIdAndDelete(req.params.id);
+
     res.json({ message: 'Lead deleted successfully' });
   } catch (error) {
     console.error('Delete lead error:', error);
-    res.status(500).json({ message: 'Server error' });
+    console.error('Error stack:', error.stack);
+    res.status(500).json({ message: 'Server error', error: process.env.NODE_ENV === 'development' ? error.message : undefined });
   }
 });
 
 // @route   POST /api/leads/bulk
 // @desc    Create multiple leads from CSV/Excel upload
 // @access  Private
-router.post('/bulk', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.post('/bulk', auth, checkModulePermission('leads', 'create'), async (req, res) => {
   try {
     const { leads } = req.body;
 
@@ -1809,7 +2076,7 @@ router.post('/bulk', auth, authorize('super_admin', 'agency_admin'), async (req,
       return res.status(400).json({ message: 'No leads data provided' });
     }
 
-    // Determine agency for leads
+    // SECURITY: Determine agency for leads
     let defaultAgencyId = null;
     if (req.user.role === 'super_admin') {
       // Super admin must provide agency in each lead or use a default
@@ -1824,8 +2091,17 @@ router.post('/bulk', auth, authorize('super_admin', 'agency_admin'), async (req,
         }
         defaultAgencyId = defaultAgency._id;
       }
+    } else if (req.user.role === 'agency_admin' || req.user.role === 'agent') {
+      // SECURITY: Agency admin/agents can ONLY use their own agency
+      if (!req.user.agency) {
+        return res.status(403).json({
+          message: 'Your account is not associated with an agency.',
+          code: 'NO_AGENCY_ASSIGNED'
+        });
+      }
+      defaultAgencyId = req.user.agency;
     } else {
-      // Agency admin uses their agency
+      // Other roles use their agency or default
       defaultAgencyId = req.user.agency;
       if (!defaultAgencyId) {
         const defaultAgency = await Agency.findOne({ isActive: true }).sort({ createdAt: 1 });
@@ -1871,9 +2147,17 @@ router.post('/bulk', auth, authorize('super_admin', 'agency_admin'), async (req,
           continue;
         }
 
-        // Resolve agency - could be ObjectId or agency name
+        // SECURITY: Agency isolation check
         let agencyId = defaultAgencyId;
         if (leadData.agency) {
+          // SECURITY: Non-super-admin cannot specify different agency
+          if (req.user.role !== 'super_admin') {
+            return res.status(403).json({
+              message: 'You can only create leads for your own agency',
+              code: 'AGENCY_OVERRIDE_DENIED'
+            });
+          }
+
           // Check if it's already an ObjectId
           if (mongoose.Types.ObjectId.isValid(leadData.agency) && String(leadData.agency).length === 24) {
             agencyId = new mongoose.Types.ObjectId(leadData.agency);
@@ -1924,7 +2208,7 @@ router.post('/bulk', auth, authorize('super_admin', 'agency_admin'), async (req,
           }
         }
 
-        // Resolve assigned agent if assignedAgentName is provided
+        // SECURITY: Resolve and validate assigned agent
         let assignedAgentId = leadData.assignedAgent || null;
         if (leadData.assignedAgentName && !assignedAgentId) {
           // Make sure agencyId is a valid ObjectId before querying
@@ -2360,7 +2644,7 @@ router.post('/webhook', async (req, res) => {
 // @route   POST /api/leads/:id/site-visit
 // @desc    Schedule site visit and send confirmation
 // @access  Private
-router.post('/:id/site-visit', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), [
+router.post('/:id/site-visit', auth, checkModulePermission('leads', 'edit'), [
   body('scheduledDate').isISO8601().withMessage('Valid scheduled date is required'),
   body('scheduledTime').trim().notEmpty().withMessage('Scheduled time is required')
 ], async (req, res) => {
@@ -2430,6 +2714,15 @@ router.post('/:id/site-visit', auth, authorize('super_admin', 'agency_admin', 'a
     if (lead.status === 'qualified' || lead.status === 'contacted' || lead.status === 'new') {
       lead.status = 'site_visit_scheduled';
     }
+
+    // Track Activity
+    lead.activityLog.push({
+      action: 'site_visit_scheduled',
+      details: {
+        description: `Site visit scheduled for ${new Date(req.body.scheduledDate).toLocaleDateString()} at ${req.body.scheduledTime}`
+      },
+      performedBy: req.user.id
+    });
 
     await lead.save();
 
@@ -2555,7 +2848,7 @@ router.post('/:id/site-visit', auth, authorize('super_admin', 'agency_admin', 'a
 // @route   PUT /api/leads/:id/site-visit/complete
 // @desc    Mark site visit as completed
 // @access  Private
-router.put('/:id/site-visit/complete', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), [
+router.put('/:id/site-visit/complete', auth, checkModulePermission('leads', 'edit'), [
   body('feedback').optional().trim(),
   body('interestLevel').optional().isIn(['high', 'medium', 'low', 'not_interested']),
   body('nextAction').optional().trim()
@@ -2576,6 +2869,15 @@ router.put('/:id/site-visit/complete', auth, authorize('super_admin', 'agency_ad
     if (lead.status === 'site_visit_scheduled') {
       lead.status = 'site_visit_completed';
     }
+
+    // Track Activity
+    lead.activityLog.push({
+      action: 'site_visit_completed',
+      details: {
+        description: `Site visit completed. Feedback: ${req.body.feedback || 'None'}`
+      },
+      performedBy: req.user.id
+    });
 
     await lead.save();
 
@@ -2605,7 +2907,7 @@ router.put('/:id/site-visit/complete', auth, authorize('super_admin', 'agency_ad
 // @route   POST /api/leads/:id/recurring-followup
 // @desc    Enable recurring follow-ups for a lead
 // @access  Private
-router.post('/:id/recurring-followup', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), [
+router.post('/:id/recurring-followup', auth, checkModulePermission('leads', 'edit'), [
   body('interval').isInt({ min: 1, max: 365 }).withMessage('Interval must be between 1 and 365 days')
 ], async (req, res) => {
   try {
@@ -2641,7 +2943,7 @@ router.post('/:id/recurring-followup', auth, authorize('super_admin', 'agency_ad
 // @route   GET /api/leads/analytics/dashboard-metrics
 // @desc    Get dashboard metrics with filters and breakdown
 // @access  Private
-router.get('/analytics/dashboard-metrics', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.get('/analytics/dashboard-metrics', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const filter = {};
 
@@ -2837,7 +3139,7 @@ router.put('/:id/entry-permissions', auth, authorize('super_admin'), async (req,
 // @route   GET /api/leads/analytics/advanced
 // @desc    Get advanced analytics with comparisons and predictions
 // @access  Private
-router.get('/analytics/advanced', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.get('/analytics/advanced', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const filter = {};
 
@@ -3018,7 +3320,7 @@ router.get('/analytics/advanced', auth, authorize('super_admin', 'agency_admin')
 // @route   GET /api/leads/analytics/campaign-roi
 // @desc    Get campaign ROI analysis report
 // @access  Private
-router.get('/analytics/campaign-roi', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.get('/analytics/campaign-roi', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const filter = {};
 
@@ -3131,7 +3433,7 @@ router.get('/analytics/campaign-roi', auth, authorize('super_admin', 'agency_adm
 // @route   GET /api/leads/analytics/lost-reasons
 // @desc    Get lost reason analysis report
 // @access  Private
-router.get('/analytics/lost-reasons', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.get('/analytics/lost-reasons', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const filter = {};
 
@@ -3207,7 +3509,7 @@ router.get('/analytics/lost-reasons', auth, authorize('super_admin', 'agency_adm
 // @route   POST /api/leads/:id/auto-stage
 // @desc    Trigger auto stage movement check
 // @access  Private
-router.post('/:id/auto-stage', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.post('/:id/auto-stage', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
   try {
     const lead = await Lead.findById(req.params.id);
     if (!lead) {

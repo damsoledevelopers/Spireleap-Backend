@@ -13,7 +13,7 @@ const router = express.Router();
 // @access  Private (Super Admin only)
 router.post('/', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('users', 'create'),
   body('firstName').trim().notEmpty().withMessage('First name is required'),
   body('lastName').trim().notEmpty().withMessage('Last name is required'),
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
@@ -113,7 +113,7 @@ router.post('/', [
 // @access  Private (Super Admin, Agency Admin)
 router.get('/', [
   auth,
-  authorize('super_admin', 'agency_admin', 'staff')
+  checkModulePermission('users', 'view')
 ], async (req, res) => {
   try {
     const page = parseInt(req.query.page) || 1;

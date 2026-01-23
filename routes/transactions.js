@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { body, validationResult } = require('express-validator');
-const { auth, authorize } = require('../middleware/auth');
+const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 const Transaction = require('../models/Transaction');
 const Property = require('../models/Property');
 const Lead = require('../models/Lead');
@@ -10,7 +10,7 @@ const Payment = require('../models/Payment');
 // @route   GET /api/transactions/analytics/revenue
 // @desc    Get revenue analytics
 // @access  Private
-router.get('/analytics/revenue', auth, authorize('super_admin', 'agency_admin'), async (req, res) => {
+router.get('/analytics/revenue', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const { startDate, endDate, agency } = req.query;
     const query = { status: 'completed' };
@@ -103,7 +103,7 @@ router.get('/analytics/revenue', auth, authorize('super_admin', 'agency_admin'),
 // @route   GET /api/transactions
 // @desc    Get all transactions
 // @access  Private
-router.get('/', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.get('/', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const { status, type, startDate, endDate, agency, agent } = req.query;
     const query = {};
@@ -144,7 +144,7 @@ router.get('/', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff')
 // @route   GET /api/transactions/:id
 // @desc    Get transaction by ID
 // @access  Private
-router.get('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.get('/:id', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const transaction = await Transaction.findById(req.params.id)
       .populate('property')
@@ -174,7 +174,7 @@ router.get('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
 // @access  Private (Super Admin, Agency Admin)
 router.post('/', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('leads', 'edit'),
   body('property').isMongoId().withMessage('Valid property ID is required'),
   body('lead').isMongoId().withMessage('Valid lead ID is required'),
   body('type').isIn(['sale', 'rent']).withMessage('Type must be sale or rent'),
@@ -254,7 +254,7 @@ router.post('/', [
 // @access  Private (Super Admin, Agency Admin)
 router.put('/:id', [
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('leads', 'edit'),
   body('status').optional().isIn(['pending', 'completed', 'cancelled', 'refunded']),
   body('amount').optional().isNumeric()
 ], async (req, res) => {

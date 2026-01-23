@@ -1,7 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const { body, validationResult } = require('express-validator');
-const { auth, authorize } = require('../middleware/auth');
+const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 const paymentService = require('../services/paymentService');
 const Payment = require('../models/Payment');
 const Transaction = require('../models/Transaction');
@@ -12,7 +12,7 @@ const Lead = require('../models/Lead');
 // @access  Private
 router.post('/create-order', 
   auth,
-  authorize('super_admin', 'agency_admin', 'agent', 'staff'),
+  checkModulePermission('leads', 'edit'),
   [
     body('amount').isNumeric().withMessage('Amount is required'),
     body('currency').optional().isString(),
@@ -81,7 +81,7 @@ router.post('/create-order',
 // @access  Private
 router.post('/verify',
   auth,
-  authorize('super_admin', 'agency_admin', 'agent', 'staff'),
+  checkModulePermission('leads', 'edit'),
   [
     body('paymentId').isMongoId().withMessage('Valid payment ID is required'),
     body('gateway').isIn(['razorpay', 'stripe']).withMessage('Valid gateway is required')
@@ -221,7 +221,7 @@ router.post('/webhook/stripe', express.raw({ type: 'application/json' }), async 
 // @access  Private (Super Admin, Agency Admin)
 router.post('/:id/refund',
   auth,
-  authorize('super_admin', 'agency_admin'),
+  checkModulePermission('leads', 'edit'),
   [
     body('amount').isNumeric().withMessage('Amount is required'),
     body('reason').optional().isString()
@@ -250,7 +250,7 @@ router.post('/:id/refund',
 // @route   GET /api/payments
 // @desc    Get all payments
 // @access  Private
-router.get('/', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.get('/', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const { status, gateway, startDate, endDate, agency } = req.query;
     const query = {};
@@ -291,7 +291,7 @@ router.get('/', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff')
 // @route   GET /api/payments/:id
 // @desc    Get payment by ID
 // @access  Private
-router.get('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.get('/:id', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const payment = await Payment.findById(req.params.id)
       .populate('transaction')
@@ -319,7 +319,7 @@ router.get('/:id', auth, authorize('super_admin', 'agency_admin', 'agent', 'staf
 // @route   GET /api/payments/:id/receipt
 // @desc    Get payment receipt
 // @access  Private
-router.get('/:id/receipt', auth, authorize('super_admin', 'agency_admin', 'agent', 'staff'), async (req, res) => {
+router.get('/:id/receipt', auth, checkModulePermission('leads', 'view'), async (req, res) => {
   try {
     const receipt = await paymentService.generateReceipt(req.params.id);
     res.json(receipt);

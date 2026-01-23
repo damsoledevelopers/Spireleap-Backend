@@ -11,10 +11,12 @@ async function seedPermissions() {
         console.log('Connected to MongoDB');
 
         const defaultPermissions = {
-            leads: { view: true, create: true, edit: true, delete: false },
-            properties: { view: true, create: true, edit: true, delete: false },
-            inquiries: { view: true, create: true, edit: true, delete: false },
-            contact_messages: { view: true, create: false, edit: true, delete: false }
+            leads: { view: true, create: true, edit: true, delete: true },
+            properties: { view: true, create: true, edit: true, delete: true },
+            inquiries: { view: true, create: true, edit: true, delete: true },
+            contact_messages: { view: true, create: false, edit: true, delete: true },
+            users: { view: true, create: true, edit: true, delete: true },
+            agencies: { view: true, create: true, edit: true, delete: true }
         };
 
         for (const role of roles) {
@@ -34,6 +36,14 @@ async function seedPermissions() {
                 }
                 if (!rolePerm.permissions.contact_messages) {
                     rolePerm.permissions.contact_messages = defaultPermissions.contact_messages;
+                    needsUpdate = true;
+                }
+                if (!rolePerm.permissions.users) {
+                    rolePerm.permissions.users = defaultPermissions.users;
+                    needsUpdate = true;
+                }
+                if (!rolePerm.permissions.agencies) {
+                    rolePerm.permissions.agencies = defaultPermissions.agencies;
                     needsUpdate = true;
                 }
 
