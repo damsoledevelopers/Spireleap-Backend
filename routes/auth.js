@@ -10,7 +10,7 @@ const router = express.Router();
 // Generate JWT token
 const generateToken = (userId) => {
   return jwt.sign({ userId }, process.env.JWT_SECRET || 'fallback_secret', {
-    expiresIn: process.env.JWT_EXPIRE || '7d'
+    expiresIn: process.env.JWT_EXPIRE || '30m'
   });
 };
 
@@ -185,6 +185,10 @@ router.post('/login', [
 
     const { email, password } = req.body;
 
+    if (process.env.NODE_ENV === 'development') {
+      console.log('Login attempt for email:', (email || '').trim().toLowerCase());
+    }
+
     if (!email || !password) {
       return res.status(400).json({
         message: 'Email and password are required',
@@ -201,6 +205,9 @@ router.post('/login', [
     const user = await User.findOne({ email: normalizedEmail }).select('+password');
 
     if (!user) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log('Login 401: no user for email:', normalizedEmail);
+      }
       return res.status(401).json({
         message: 'Invalid email or password',
         error: 'USER_NOT_FOUND'
@@ -209,6 +216,9 @@ router.post('/login', [
 
     // Check if user is active
     if (!user.isActive) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log('Login 401: user inactive:', normalizedEmail);
+      }
       return res.status(401).json({
         message: 'Your account is pending approval. Please contact an administrator.',
         error: 'ACCOUNT_INACTIVE'
@@ -217,12 +227,16 @@ router.post('/login', [
 
     // Check password - make sure password field exists
     if (!user.password) {
+      console.error('Login: user has no password set:', user._id);
       return res.status(500).json({ message: 'Account error. Please contact support.' });
     }
 
     const isMatch = await user.comparePassword(trimmedPassword);
 
     if (!isMatch) {
+      if (process.env.NODE_ENV === 'development') {
+        console.log('Login 401: wrong password for:', normalizedEmail);
+      }
       return res.status(401).json({
         message: 'Invalid email or password',
         error: 'INVALID_PASSWORD'
@@ -255,6 +269,54 @@ router.post('/login', [
       message: 'Server error during login',
       error: error.message
     });
+  }
+});
+
+// @route   POST /api/auth/refresh-token
+// @desc    Issue new access token using current (possibly expired) JWT
+// @access  Private (sends Bearer token in header)
+router.post('/refresh-token', async (req, res) => {
+  try {
+    const token = req.header('Authorization')?.replace('Bearer ', '');
+    if (!token) {
+      return res.status(401).json({ message: 'No token provided' });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret', {
+        ignoreExpiration: true
+      });
+    } catch (err) {
+      return res.status(401).json({ message: 'Invalid token' });
+    }
+
+    const user = await User.findById(decoded.userId).populate('agency', 'name logo');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    if (!user.isActive) {
+      return res.status(401).json({ message: 'Account is inactive' });
+    }
+
+    const newToken = generateToken(user._id);
+    res.json({
+      token: newToken,
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        role: user.role,
+        agency: user.agency ? (typeof user.agency === 'object' ? user.agency._id : user.agency) : null,
+        agencyName: user.agency && typeof user.agency === 'object' ? user.agency.name : null,
+        lastLogin: user.lastLogin,
+        isActive: user.isActive
+      }
+    });
+  } catch (error) {
+    console.error('Refresh token error:', error);
+    res.status(500).json({ message: 'Server error' });
   }
 });
 
