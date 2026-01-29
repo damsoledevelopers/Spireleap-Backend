@@ -3,6 +3,7 @@ const { body, validationResult } = require('express-validator');
 const mongoose = require('mongoose');
 const Agency = require('../models/Agency');
 const User = require('../models/User');
+const AgencyPermission = require('../models/AgencyPermission');
 const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 
 const router = express.Router();
@@ -56,6 +57,57 @@ router.get('/', auth, checkModulePermission('agencies', 'view'), async (req, res
     });
   } catch (error) {
     console.error('Get agencies error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   GET /api/agencies/:id/permissions
+// @desc    Get permissions for a specific agency (super_admin only)
+// @access  Private
+router.get('/:id/permissions', auth, authorize('super_admin'), async (req, res) => {
+  try {
+    const agency = await Agency.findById(req.params.id);
+    if (!agency) {
+      return res.status(404).json({ message: 'Agency not found' });
+    }
+    let agencyPermission = await AgencyPermission.findOne({ agency: req.params.id });
+    if (!agencyPermission) {
+      agencyPermission = new AgencyPermission({ agency: req.params.id });
+      await agencyPermission.save();
+    }
+    res.json(agencyPermission);
+  } catch (error) {
+    console.error('Get agency permissions error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/agencies/:id/permissions
+// @desc    Update permissions for a specific agency (super_admin only)
+// @access  Private
+router.put('/:id/permissions', auth, authorize('super_admin'), async (req, res) => {
+  try {
+    const agency = await Agency.findById(req.params.id);
+    if (!agency) {
+      return res.status(404).json({ message: 'Agency not found' });
+    }
+    const { permissions } = req.body;
+    let agencyPermission = await AgencyPermission.findOne({ agency: req.params.id });
+    if (agencyPermission) {
+      agencyPermission.permissions = permissions;
+      agencyPermission.lastUpdatedBy = req.user.id;
+      await agencyPermission.save();
+    } else {
+      agencyPermission = new AgencyPermission({
+        agency: req.params.id,
+        permissions: permissions || {},
+        lastUpdatedBy: req.user.id
+      });
+      await agencyPermission.save();
+    }
+    res.json(agencyPermission);
+  } catch (error) {
+    console.error('Update agency permissions error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

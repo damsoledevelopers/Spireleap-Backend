@@ -47,10 +47,16 @@ router.get('/blogs', optionalAuth, async (req, res) => {
 
 // @route   GET /api/cms/blogs/:slug
 // @desc    Get single blog by slug
-// @access  Public
-router.get('/blogs/:slug', async (req, res) => {
+// @access  Public (published only); admins can see drafts
+router.get('/blogs/:slug', optionalAuth, async (req, res) => {
   try {
-    const blog = await Blog.findOne({ slug: req.params.slug })
+    const filter = { slug: req.params.slug };
+    // Only show published blogs to non-admin users
+    if (!req.user || (req.user.role !== 'super_admin' && req.user.role !== 'agency_admin')) {
+      filter.status = 'published';
+    }
+
+    const blog = await Blog.findOne(filter)
       .populate('author', 'firstName lastName profileImage')
       .populate('category', 'name slug');
 
@@ -180,10 +186,18 @@ router.get('/pages', optionalAuth, async (req, res) => {
 
 // @route   GET /api/cms/pages/:slug
 // @desc    Get single page by slug
-// @access  Public
-router.get('/pages/:slug', async (req, res) => {
+// @access  Public (with optional auth for admin access to inactive pages)
+router.get('/pages/:slug', optionalAuth, async (req, res) => {
   try {
-    const page = await Page.findOne({ slug: req.params.slug, isActive: true });
+    const filter = { slug: req.params.slug };
+
+    // Only show active pages to non-admin users
+    // Admins can see all pages including inactive ones
+    if (!req.user || (req.user.role !== 'super_admin' && req.user.role !== 'agency_admin')) {
+      filter.isActive = true;
+    }
+
+    const page = await Page.findOne(filter);
     if (!page) {
       return res.status(404).json({ message: 'Page not found' });
     }

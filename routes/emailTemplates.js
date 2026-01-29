@@ -1,14 +1,14 @@
 const express = require('express');
 const { body, validationResult, query, param } = require('express-validator');
 const EmailTemplate = require('../models/EmailTemplate');
-const { auth, authorize } = require('../middleware/auth');
+const { auth, checkModulePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
 // @route   GET /api/email-templates
 // @desc    Get all email templates
-// @access  Private (Super Admin)
-router.get('/', auth, authorize('super_admin'), [
+// @access  Private (CMS view)
+router.get('/', auth, checkModulePermission('cms', 'view'), [
   query('category').optional(),
   query('isActive').optional().isBoolean()
 ], async (req, res) => {
@@ -31,8 +31,8 @@ router.get('/', auth, authorize('super_admin'), [
 
 // @route   GET /api/email-templates/:id
 // @desc    Get email template by ID
-// @access  Private (Super Admin)
-router.get('/:id', auth, authorize('super_admin'), [
+// @access  Private (CMS view)
+router.get('/:id', auth, checkModulePermission('cms', 'view'), [
   param('id').isMongoId().withMessage('Invalid template ID')
 ], async (req, res) => {
   try {
@@ -53,8 +53,8 @@ router.get('/:id', auth, authorize('super_admin'), [
 
 // @route   GET /api/email-templates/slug/:slug
 // @desc    Get email template by slug
-// @access  Private (Super Admin)
-router.get('/slug/:slug', auth, authorize('super_admin'), async (req, res) => {
+// @access  Private (CMS view)
+router.get('/slug/:slug', auth, checkModulePermission('cms', 'view'), async (req, res) => {
   try {
     const template = await EmailTemplate.findOne({ slug: req.params.slug });
 
@@ -71,7 +71,7 @@ router.get('/slug/:slug', auth, authorize('super_admin'), async (req, res) => {
 
 // @route   POST /api/email-templates
 // @desc    Create email template
-// @access  Private (Super Admin)
+// @access  Private (CMS create)
 // Helper function to check if HTML content is not empty (ignores empty tags)
 const isHtmlContentValid = (html) => {
   if (!html || typeof html !== 'string') return false;
@@ -82,7 +82,7 @@ const isHtmlContentValid = (html) => {
 
 router.post('/', [
   auth,
-  authorize('super_admin'),
+  checkModulePermission('cms', 'create'),
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('subject').trim().notEmpty().withMessage('Subject is required'),
   body('htmlContent').custom((value) => {
@@ -204,10 +204,10 @@ router.post('/', [
 
 // @route   PUT /api/email-templates/:id
 // @desc    Update email template
-// @access  Private (Super Admin)
+// @access  Private (CMS edit)
 router.put('/:id', [
   auth,
-  authorize('super_admin'),
+  checkModulePermission('cms', 'edit'),
   param('id').isMongoId().withMessage('Invalid template ID'),
   body('subject').optional().trim().notEmpty(),
   body('htmlContent').optional().trim().notEmpty()
@@ -276,10 +276,10 @@ router.put('/:id', [
 
 // @route   DELETE /api/email-templates/:id
 // @desc    Delete email template
-// @access  Private (Super Admin)
+// @access  Private (CMS delete)
 router.delete('/:id', [
   auth,
-  authorize('super_admin'),
+  checkModulePermission('cms', 'delete'),
   param('id').isMongoId().withMessage('Invalid template ID')
 ], async (req, res) => {
   try {

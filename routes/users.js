@@ -2,6 +2,7 @@ const express = require('express');
 const { body, validationResult, param } = require('express-validator');
 const mongoose = require('mongoose');
 const User = require('../models/User');
+const UserPermission = require('../models/UserPermission');
 const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 const emailService = require('../services/emailService');
 const Agency = require('../models/Agency');
@@ -247,6 +248,57 @@ router.get('/stats/overview', [
     });
   } catch (error) {
     console.error('Get user stats error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   GET /api/users/:id/permissions
+// @desc    Get permissions for a specific user (super_admin only)
+// @access  Private
+router.get('/:id/permissions', auth, authorize('super_admin'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('firstName lastName email role');
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    let userPermission = await UserPermission.findOne({ user: req.params.id });
+    if (!userPermission) {
+      userPermission = new UserPermission({ user: req.params.id });
+      await userPermission.save();
+    }
+    res.json(userPermission);
+  } catch (error) {
+    console.error('Get user permissions error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/users/:id/permissions
+// @desc    Update permissions for a specific user (super_admin only)
+// @access  Private
+router.put('/:id/permissions', auth, authorize('super_admin'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) {
+      return res.status(404).json({ message: 'User not found' });
+    }
+    const { permissions } = req.body;
+    let userPermission = await UserPermission.findOne({ user: req.params.id });
+    if (userPermission) {
+      userPermission.permissions = permissions;
+      userPermission.lastUpdatedBy = req.user.id;
+      await userPermission.save();
+    } else {
+      userPermission = new UserPermission({
+        user: req.params.id,
+        permissions: permissions || {},
+        lastUpdatedBy: req.user.id
+      });
+      await userPermission.save();
+    }
+    res.json(userPermission);
+  } catch (error) {
+    console.error('Update user permissions error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

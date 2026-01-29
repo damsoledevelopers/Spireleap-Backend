@@ -1,6 +1,8 @@
 const jwt = require('jsonwebtoken');
 const User = require('../models/User');
 const RolePermission = require('../models/RolePermission');
+const AgencyPermission = require('../models/AgencyPermission');
+const UserPermission = require('../models/UserPermission');
 
 const auth = async (req, res, next) => {
   try {
@@ -73,16 +75,32 @@ const checkModulePermission = (moduleName, action) => {
       }
 
       console.log(`Permission check - Role: ${req.user.role}, Module: ${moduleName}, Action: ${action}`);
-      const rolePermission = await RolePermission.findOne({ role: req.user.role });
 
-      if (!rolePermission) {
-        console.log(`Permission check failed - No RolePermission found for role: ${req.user.role}`);
-        return res.status(403).json({ message: `Access denied. No module permissions defined for role: ${req.user.role}` });
+      // 1) Per-user permissions (highest priority)
+      let modulePerms = null;
+      const userPermission = await UserPermission.findOne({ user: req.user.id });
+      if (userPermission && userPermission.permissions[moduleName]) {
+        modulePerms = userPermission.permissions[moduleName];
+        console.log(`Permission check - Using per-user permissions for user ${req.user.id}`);
+      }
+      // 2) Per-agency permissions (for agency_admin, agent, staff)
+      if (!modulePerms && req.user.agency && ['agency_admin', 'agent', 'staff'].includes(req.user.role)) {
+        const agencyPermission = await AgencyPermission.findOne({ agency: req.user.agency });
+        if (agencyPermission && agencyPermission.permissions[moduleName]) {
+          modulePerms = agencyPermission.permissions[moduleName];
+          console.log(`Permission check - Using agency-specific permissions for agency ${req.user.agency}`);
+        }
+      }
+      // 3) Role permissions (fallback)
+      if (!modulePerms) {
+        const rolePermission = await RolePermission.findOne({ role: req.user.role });
+        if (!rolePermission) {
+          console.log(`Permission check failed - No RolePermission found for role: ${req.user.role}`);
+          return res.status(403).json({ message: `Access denied. No module permissions defined for role: ${req.user.role}` });
+        }
+        modulePerms = rolePermission.permissions[moduleName];
       }
 
-      const modulePerms = rolePermission.permissions[moduleName];
-      console.log(`Permission check - Module permissions for ${moduleName}:`, JSON.stringify(modulePerms, null, 2));
-      
       if (!modulePerms) {
         console.log(`Permission check failed - Module ${moduleName} not found in permissions`);
         return res.status(403).json({

@@ -2,8 +2,39 @@ const express = require('express');
 const jwt = require('jsonwebtoken');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
+const RolePermission = require('../models/RolePermission');
+const AgencyPermission = require('../models/AgencyPermission');
+const UserPermission = require('../models/UserPermission');
 const { auth } = require('../middleware/auth');
 const emailService = require('../services/emailService');
+
+async function getEffectivePermissions(userId, userRole, userAgency) {
+  if (userRole === 'super_admin') {
+    return {
+      leads: { view: true, create: true, edit: true, delete: true },
+      properties: { view: true, create: true, edit: true, delete: true },
+      inquiries: { view: true, create: true, edit: true, delete: true },
+      contact_messages: { view: true, create: true, edit: true, delete: true },
+      users: { view: true, create: true, edit: true, delete: true },
+      agencies: { view: true, create: true, edit: true, delete: true }
+    };
+  }
+  let permDoc = await UserPermission.findOne({ user: userId });
+  if (permDoc && permDoc.permissions) {
+    return JSON.parse(JSON.stringify(permDoc.permissions));
+  }
+  if (userAgency && ['agency_admin', 'agent', 'staff'].includes(userRole)) {
+    permDoc = await AgencyPermission.findOne({ agency: userAgency });
+    if (permDoc && permDoc.permissions) {
+      return JSON.parse(JSON.stringify(permDoc.permissions));
+    }
+  }
+  permDoc = await RolePermission.findOne({ role: userRole });
+  if (permDoc && permDoc.permissions) {
+    return JSON.parse(JSON.stringify(permDoc.permissions));
+  }
+  return {};
+}
 
 const router = express.Router();
 
@@ -321,7 +352,7 @@ router.post('/refresh-token', async (req, res) => {
 });
 
 // @route   GET /api/auth/me
-// @desc    Get current user
+// @desc    Get current user and effective permissions (for hiding denied modules on frontend)
 // @access  Private
 router.get('/me', auth, async (req, res) => {
   try {
@@ -330,13 +361,8 @@ router.get('/me', auth, async (req, res) => {
       return res.status(404).json({ message: 'User not found' });
     }
 
-    // Log user data for debugging
-    console.log('User data for /auth/me:', {
-      email: user.email,
-      role: user.role,
-      agency: user.agency ? user.agency._id : 'No agency',
-      agencyName: user.agency ? user.agency.name : 'N/A'
-    });
+    const agencyId = user.agency ? (typeof user.agency === 'object' ? user.agency._id : user.agency) : null;
+    const permissions = await getEffectivePermissions(req.user.id, user.role, agencyId);
 
     res.json({
       user: {
@@ -354,7 +380,8 @@ router.get('/me', auth, async (req, res) => {
         profileImage: user.profileImage,
         agentInfo: user.agentInfo,
         staffInfo: user.staffInfo
-      }
+      },
+      permissions
     });
   } catch (error) {
     console.error('Get user error:', error);
