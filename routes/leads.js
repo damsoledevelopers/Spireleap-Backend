@@ -125,18 +125,13 @@ router.get('/', auth, checkModulePermission('leads', 'view'), [
         filter[`entryPermissions.agency_admin.view`] = { $ne: false };
       } else if (req.user.role === 'agent') {
         const agentId = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
-        const agentProperties = await Property.find({ agent: agentId }).distinct('_id');
 
-        // Agent visibility: ONLY assigned leads from their agency
+        // Agent visibility: ONLY inquiries/leads assigned to this agent
         filter.agency = userAgencyId;
-        filter.$or = [
-          { assignedAgent: agentId },
-          { property: { $in: agentProperties } }
-        ];
-        // Entry permissions are respected but cannot override agency/assignment restriction
+        filter.assignedAgent = agentId;
         filter[`entryPermissions.agent.view`] = { $ne: false };
 
-        console.log(`🔍 Agent ${req.user.id} filtering leads - strict agency isolation`);
+        console.log(`🔍 Agent ${req.user.id} filtering leads - only assigned to agent`);
       } else if (req.user.role === 'staff') {
         // Staff has global access logic same as Super Admin, so we do nothing here (falls through)
       }

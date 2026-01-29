@@ -177,8 +177,13 @@ router.get('/', [
         filter.agency = agency;
       }
     } else if (req.user.role === 'agency_admin') {
-      // Agency admin can only see users from their agency
-      filter.agency = req.user.agency;
+      // Agency admin: only agents/users created or added by this agency
+      const agencyId = req.user.agency;
+      if (agencyId && mongoose.Types.ObjectId.isValid(agencyId)) {
+        filter.agency = new mongoose.Types.ObjectId(agencyId);
+      } else {
+        filter.agency = agencyId;
+      }
     }
 
     // Build sort object

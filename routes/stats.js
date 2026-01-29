@@ -269,6 +269,10 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
     let leadFilter = { ...dateFilter };
     let propertyFilter = { ...dateFilter };
 
+    const agencyIdForFilter = req.user.agency && mongoose.Types.ObjectId.isValid(req.user.agency)
+      ? new mongoose.Types.ObjectId(req.user.agency)
+      : req.user.agency;
+
     // Role-based filtering
     if (req.user.role === 'agency_admin') {
       leadFilter.agency = req.user.agency;
@@ -434,7 +438,7 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
         {
           $match: {
             role: 'agent',
-            ...(req.user.role !== 'super_admin' ? { agency: agencyId } : {})
+            ...(req.user.role !== 'super_admin' && agencyIdForFilter ? { agency: agencyIdForFilter } : {})
           }
         },
         {
@@ -512,6 +516,68 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       }))
     ].sort((a, b) => new Date(b.time) - new Date(a.time));
 
+    // Agency analysis (super_admin and agency_admin only)
+    let agencyAnalysis = [];
+    if (req.user.role === 'super_admin' || req.user.role === 'agency_admin') {
+      const agencyFilterForList = req.user.role === 'agency_admin' && agencyIdForFilter
+        ? { _id: agencyIdForFilter }
+        : {};
+      const [agencies, agentsByAgency, propertiesByAgency, leadsByAgency] = await Promise.all([
+        Agency.find(agencyFilterForList).lean(),
+        User.aggregate([
+          { $match: { role: 'agent', ...(agencyFilterForList._id ? { agency: agencyFilterForList._id } : {}) } },
+          { $group: { _id: '$agency', totalAgents: { $sum: 1 }, activeAgents: { $sum: { $cond: ['$isActive', 1, 0] } } } }
+        ]),
+        Property.aggregate([
+          { $match: agencyFilterForList._id ? { agency: agencyFilterForList._id } : {} },
+          { $group: { _id: '$agency', totalProperties: { $sum: 1 }, activeProperties: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } }, totalPropertyValue: { $sum: { $ifNull: ['$price.sale', 0] } } } }
+        ]),
+        Lead.aggregate([
+          { $match: agencyFilterForList._id ? { agency: agencyFilterForList._id } : {} },
+          { $group: { _id: '$agency', totalLeads: { $sum: 1 }, convertedLeads: { $sum: { $cond: [{ $in: ['$status', ['booked', 'closed']] }, 1, 0] } } } }
+        ])
+      ]);
+      const agentsMap = Object.fromEntries((agentsByAgency || []).map(x => [x._id?.toString(), x]));
+      const propsMap = Object.fromEntries((propertiesByAgency || []).map(x => [x._id?.toString(), x]));
+      const leadsMap = Object.fromEntries((leadsByAgency || []).map(x => [x._id?.toString(), x]));
+      agencyAnalysis = (agencies || []).map(agency => {
+        const id = agency._id?.toString();
+        const agents = agentsMap[id] || { totalAgents: 0, activeAgents: 0 };
+        const props = propsMap[id] || { totalProperties: 0, activeProperties: 0, totalPropertyValue: 0 };
+        const leads = leadsMap[id] || { totalLeads: 0, convertedLeads: 0 };
+        const totalAgents = agents.totalAgents || 0;
+        const totalLeads = leads.totalLeads || 0;
+        const hasNoAgents = totalAgents === 0;
+        const hasNoLeads = totalLeads === 0;
+        let healthStatus = 'good';
+        if (hasNoAgents || hasNoLeads) healthStatus = 'poor';
+        else if (totalLeads < 5 || totalAgents === 0) healthStatus = 'average';
+        const healthLabel = healthStatus === 'good' ? 'Good' : healthStatus === 'average' ? 'Average' : 'Needs attention';
+        const conversionRate = totalLeads > 0 ? ((leads.convertedLeads / totalLeads) * 100).toFixed(1) : 0;
+        return {
+          id,
+          name: agency.name || '',
+          email: agency.contact?.email || '',
+          phone: agency.contact?.phone || '',
+          logo: agency.logo || null,
+          isActive: true,
+          hasNoAgents,
+          hasNoLeads,
+          healthStatus,
+          healthLabel,
+          totalAgents,
+          activeAgents: agents.activeAgents || 0,
+          totalProperties: props.totalProperties || 0,
+          activeProperties: props.activeProperties || 0,
+          totalLeads,
+          convertedLeads: leads.convertedLeads || 0,
+          conversionRate: Number(conversionRate),
+          totalPropertyValue: props.totalPropertyValue || 0,
+          daysSinceActivity: null
+        };
+      });
+    }
+
     res.json({
       propertiesByStatus: formatStats(propertiesByStatus),
       propertiesByType: formatStats(propertiesByType),
@@ -527,7 +593,8 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
         ...a,
         name: `${a.firstName || ''} ${a.lastName || ''}`.trim() || a.email,
         conversionRate: a.totalLeads > 0 ? ((a.convertedLeads / a.totalLeads) * 100).toFixed(1) : 0
-      }))
+      })),
+      agencyAnalysis
     });
   } catch (error) {
     console.error('Get report stats error:', error);
