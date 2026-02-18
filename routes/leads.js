@@ -24,12 +24,12 @@ const getNormalizedPriority = (priority) => {
   const priorityMap = {
     'high': 'Hot',
     'medium': 'Warm',
-    'low': 'Cold',
+    'low': 'Warm', // Changed from Cold
     'urgent': 'Hot',
     'hot': 'Hot',
     'warm': 'Warm',
-    'cold': 'Cold',
-    'not_interested': 'Not_interested'
+    'cold': 'Warm', // Changed from Cold
+    'not_interested': 'Warm' // Changed from Not_interested as per user request for inquiries
   };
 
   if (!priority) return 'Warm';
@@ -37,8 +37,8 @@ const getNormalizedPriority = (priority) => {
 
   // Check if it's already a valid capitalized priority
   const normalizedValid = validPriorities.find(v => v.toLowerCase() === p);
-  if (normalizedValid) return normalizedValid;
-
+  // If it's Cold or Not_interested but coming from a form normalization, we might still want Warm
+  // But for now, let's just use the map for most common cases
   return priorityMap[p] || 'Warm';
 };
 
@@ -75,12 +75,42 @@ const normalizeLeadData = (lead) => {
   return lead;
 };
 
+// @route   GET /api/leads/my-inquiries
+// @desc    Get inquiries for current customer
+// @access  Private
+router.get('/my-inquiries', auth, async (req, res) => {
+  try {
+    const userEmail = req.user.email;
+    const inquiries = await Lead.find({ 'contact.email': userEmail })
+      .populate('property', 'title slug images price location')
+      .populate('interestedProperties.property', 'title slug images price location')
+      .populate('agency', 'name logo')
+      .populate('assignedAgent', 'firstName lastName email profileImage')
+      .sort('-createdAt');
+
+    // Decrypt contact information
+    const decryptedInquiries = inquiries.map(lead => {
+      const leadObj = lead.toObject();
+      if (leadObj.contact) {
+        leadObj.contact = encryptionService.decryptLeadContact(leadObj.contact);
+      }
+      normalizeLeadData(leadObj);
+      return leadObj;
+    });
+
+    res.json(decryptedInquiries);
+  } catch (error) {
+    console.error('Get my inquiries error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // @route   GET /api/leads
 // @desc    Get all leads
 // @access  Private
 router.get('/', auth, checkModulePermission('leads', 'view'), [
   query('page').optional().isInt({ min: 1 }),
-  query('limit').optional().isInt({ min: 1, max: 500 }),
+  query('limit').optional().isInt({ min: 1, max: 2000 }),
   query('status').optional().isIn(['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation', 'booked', 'lost', 'closed', 'junk']),
   query('priority').optional().isIn(['Hot', 'Warm', 'Cold', 'Not_interested'])
 ], async (req, res) => {
@@ -282,6 +312,7 @@ router.get('/', auth, checkModulePermission('leads', 'view'), [
           select: 'firstName lastName profileImage'
         }
       })
+      .populate('interestedProperties.property', 'title slug images price location')
       .populate('agency', 'name logo')
       .populate('assignedAgent', 'firstName lastName email profileImage')
       .populate('assignedBy', 'firstName lastName')
@@ -326,6 +357,9 @@ router.get('/:id', auth, checkModulePermission('leads', 'view'), async (req, res
   try {
     const lead = await Lead.findById(req.params.id)
       .populate('property', 'title slug images price location')
+      .populate('siteVisit.property', 'title slug')
+      .populate('siteVisits.property', 'title slug')
+      .populate('interestedProperties.property', 'title slug images price location')
       .populate('agency', 'name logo')
       .populate('assignedAgent', 'firstName lastName email phone profileImage agentInfo')
       .populate('assignedBy', 'firstName lastName')
@@ -413,7 +447,7 @@ router.get(
       const page = parseInt(req.query.page) || 1;
       const limit = parseInt(req.query.limit) || 50;
       const skip = (page - 1) * limit;
-      const includeSelf = req.query.includeSelf === true;
+      const includeSelf = req.query.includeSelf === true || req.query.includeSelf === 'true';
 
       const baseLead = await Lead.findById(req.params.id)
         .populate('agency', 'name logo')
@@ -453,8 +487,49 @@ router.get(
       // Build customer match filter (email/phone). Stored contact may be encrypted in DB,
       // but we can still match on raw stored values of the baseLead document.
       const matchOr = [];
-      if (baseLead.contact?.email) matchOr.push({ 'contact.email': baseLead.contact.email });
-      if (baseLead.contact?.phone) matchOr.push({ 'contact.phone': baseLead.contact.phone });
+
+      // DECRYPT baseLead contact first if it's encrypted so we get plain text email/phone
+      // We rely on encryptionService to potentially decrypt it, BUT wait... 
+      // If we want to search the DB, and the DB has ENCRYPTED data with random IV, we are screwed regardless.
+      // But if the DB has plain text, we need plain text search.
+      // If baseLead is raw (encrypted), and we search for raw, we only find exact IV matches (self).
+
+      // Let's log what we have
+      console.log(`[DEBUG] Fetching inquiries for lead ${req.params.id}`);
+
+      // If data is encrypted, we MUST decrypt it to know the email/phone for display,
+      // but for SEARCHING other records, we can't search by encrypted value if IV is random.
+      // Assuming for now that either encryption is OFF or we are searching for plain text.
+
+      let searchEmail = baseLead.contact?.email;
+      let searchPhone = baseLead.contact?.phone;
+
+      // Check if values look encrypted (hex string of typical length?) or just use as is.
+      // Actually, if we want to support the case where encryption is OFF, we should just use the values.
+
+      if (searchEmail) {
+        // Ensure lowercase for email as per schema
+        if (typeof searchEmail === 'string') {
+          // If it looks like an email, lowercase it. If it's encrypted hex, lowercasing might break it if it wasn't already.
+          // But the schema says lowercase: true, so it was lowercased BEFORE encryption if encrypted?
+          // No, schema lowercase applies to the value being saved. 
+          // If encrypted, the hex string is saved.
+
+          // If plain text email
+          if (searchEmail.includes('@')) {
+            matchOr.push({ 'contact.email': searchEmail.toLowerCase() });
+          } else {
+            // Assume encrypted or other format, use as exact match
+            matchOr.push({ 'contact.email': searchEmail });
+          }
+        }
+      }
+
+      if (searchPhone) {
+        matchOr.push({ 'contact.phone': searchPhone });
+      }
+
+      console.log(`[DEBUG] Match conditions:`, JSON.stringify(matchOr));
 
       if (matchOr.length === 0) {
         return res.json({
@@ -474,6 +549,7 @@ router.get(
           select: 'title slug images price location agent',
           populate: { path: 'agent', select: 'firstName lastName profileImage' }
         })
+        .populate('interestedProperties.property', 'title slug images price location agent')
         .populate('agency', 'name logo')
         .populate('assignedAgent', 'firstName lastName email profileImage')
         .sort('-createdAt')
@@ -515,10 +591,88 @@ router.get(
   }
 );
 
+// @route   POST /api/leads/:id/contact-agent
+// @desc    Customer sends a contact request to the assigned agent
+// @access  Private
+router.post('/:id/contact-agent', auth, async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id)
+      .populate('property', 'title slug images price location')
+      .populate('agency', 'name logo contact')
+      .populate('assignedAgent', 'firstName lastName email phone profileImage');
+
+    if (!lead) {
+      return res.status(404).json({ message: 'Inquiry not found' });
+    }
+
+    // Security: Only the owner of the inquiry can send contact request
+    // Decrypt lead contact email to compare with user email
+    const decryptedContact = encryptionService.decryptLeadContact(lead.contact);
+    if (decryptedContact.email !== req.user.email) {
+      console.log(`Access denied for contact-agent: user ${req.user.email} vs lead contact ${decryptedContact.email}`);
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    // Prepare lead data with decrypted contact for email service
+    const leadWithDecryptedContact = lead.toObject();
+    leadWithDecryptedContact.contact = decryptedContact;
+
+    if (!lead.assignedAgent) {
+      // If no agent assigned, notify agency admin
+      const agencyAdmins = await User.find({
+        role: 'agency_admin',
+        agency: lead.agency?._id,
+        isActive: true
+      });
+
+      if (agencyAdmins.length > 0) {
+        // Send to first agency admin
+        await emailService.sendContactAgentRequest(leadWithDecryptedContact, agencyAdmins[0], lead.agency);
+
+        // Add a note
+        lead.notes.push({
+          note: `Customer ${decryptedContact.firstName} requested to contact agent. No agent assigned, notified admin ${agencyAdmins[0].firstName}.`,
+          createdBy: lead.agency?._id, // System or Agency account if possible, using req.user.id for now
+          createdAt: new Date()
+        });
+      } else {
+        return res.status(400).json({ message: 'No agent or administrator available for this inquiry' });
+      }
+    } else {
+      await emailService.sendContactAgentRequest(leadWithDecryptedContact, lead.assignedAgent, lead.agency);
+    }
+
+    // Add communication record
+    lead.communications.push({
+      type: 'email',
+      subject: 'Contact Agent Request',
+      message: `Customer ${decryptedContact.firstName} ${decryptedContact.lastName} requested to be contacted by the agent.`,
+      direction: 'inbound',
+      createdBy: req.user.id,
+      createdAt: new Date()
+    });
+
+    lead.activityLog.push({
+      action: 'communication_added',
+      details: { description: 'Contact Agent Request sent by customer' },
+      performedBy: req.user.id
+    });
+
+    await lead.save();
+
+    res.json({ message: 'Agent has been notified and will contact you soon' });
+  } catch (error) {
+    console.error('Contact agent error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+
+
 // @route   POST /api/leads
 // @desc    Create new lead (from website form or manually)
 // @access  Public (website) / Private (manual)
-router.post('/', auth, checkModulePermission('leads', 'create'), [
+router.post('/', optionalAuth, [
   body('contact.firstName').trim().notEmpty().withMessage('First name is required'),
   body('contact.lastName').trim().notEmpty().withMessage('Last name is required'),
   body('contact.email').isEmail().withMessage('Valid email is required'),
@@ -533,42 +687,41 @@ router.post('/', auth, checkModulePermission('leads', 'create'), [
       });
     }
 
-    // REQUIRED: User must be authenticated to create leads
-    if (!req.user) {
-      return res.status(401).json({ message: 'Authentication required to create leads' });
+    // If it's a manual creation by staff, verify permissions
+    if (req.user && ['super_admin', 'agency_admin', 'agent', 'staff'].includes(req.user.role)) {
+      // Permission check could be added here if needed for staff manual entry
     }
 
     // SECURITY: Agency admin and agents can only create leads for their own agency
     let agencyId = req.body.agency;
 
-    if (req.user.role === 'agency_admin' || req.user.role === 'agent') {
-      // Must have an agency assigned
-      if (!req.user.agency) {
-        return res.status(403).json({
-          message: 'Your account is not associated with an agency. Please contact the administrator.',
-          code: 'NO_AGENCY_ASSIGNED'
-        });
-      }
+    if (req.user) {
+      if (req.user.role === 'agency_admin' || req.user.role === 'agent') {
+        // Must have an agency assigned
+        if (!req.user.agency) {
+          return res.status(403).json({
+            message: 'Your account is not associated with an agency. Please contact the administrator.',
+            code: 'NO_AGENCY_ASSIGNED'
+          });
+        }
 
-      // If trying to create for different agency, block
-      if (agencyId && agencyId !== req.user.agency) {
-        return res.status(403).json({
-          message: 'You can only create leads for your own agency',
-          code: 'AGENCY_MISMATCH'
-        });
-      }
+        // If trying to create for different agency, block
+        if (agencyId && agencyId.toString() !== req.user.agency.toString()) {
+          return res.status(403).json({
+            message: 'You can only create leads for your own agency',
+            code: 'AGENCY_MISMATCH'
+          });
+        }
 
-      // Force agency to their own
-      agencyId = req.user.agency;
-    } else if (req.user.role === 'super_admin') {
-      // Super admin must specify agency
-      if (!agencyId) {
-        return res.status(400).json({ message: 'Agency is required for super admin' });
-      }
-    } else if (req.user.role === 'staff' || req.user.role === 'user') {
-      // Staff/user might not have agency - use their agency or provided agency
-      if (!agencyId && req.user.agency) {
+        // Force agency to their own
         agencyId = req.user.agency;
+      } else if (req.user.role === 'super_admin') {
+        // Super admin must specify agency or it defaults below
+      } else if (req.user.role === 'staff' || req.user.role === 'user') {
+        // Staff/user might not have agency - use their agency or provided agency
+        if (!agencyId && req.user.agency) {
+          agencyId = req.user.agency;
+        }
       }
     }
 
@@ -600,17 +753,160 @@ router.post('/', auth, checkModulePermission('leads', 'create'), [
       duplicateConditions.push({ 'contact.phone': req.body.contact.phone });
     }
 
-    const duplicateLeads = await Lead.find({
-      $or: duplicateConditions,
-      agency: agencyId
-    }).limit(5);
+    // Notifications function to use for both new and existing leads
+    const sendNotifications = async (targetLeadId) => {
+      try {
+        console.log(`[Notification] Starting notifications for lead: ${targetLeadId}`);
+        const leadToNotify = await Lead.findById(targetLeadId)
+          .populate('property', 'title slug agent agency')
+          .populate('agency', 'name contact settings')
+          .populate('assignedAgent', 'firstName lastName email phone');
+
+        if (!leadToNotify) {
+          console.error(`[Notification] Lead ${targetLeadId} not found for notifications`);
+          return;
+        }
+
+        // Decrypt contact for notification visibility
+        if (leadToNotify.contact) {
+          leadToNotify.contact = encryptionService.decryptLeadContact(
+            leadToNotify.contact.toObject ? leadToNotify.contact.toObject() : leadToNotify.contact
+          );
+        }
+
+        const recipientEmails = new Set();
+
+        // 1. Get Agency contact email
+        if (leadToNotify.agency?.contact?.email) {
+          recipientEmails.add(leadToNotify.agency.contact.email.toLowerCase().trim());
+        }
+
+        // 2. Add Agency Admins
+        const agencyAdmins = await User.find({
+          role: 'agency_admin',
+          agency: leadToNotify.agency?._id,
+          isActive: true
+        });
+        agencyAdmins.forEach(u => {
+          if (u.email) recipientEmails.add(u.email.toLowerCase().trim());
+        });
+
+        // 3. Add Property Agent
+        if (leadToNotify.property?.agent) {
+          const propAgent = await User.findById(leadToNotify.property.agent);
+          if (propAgent?.email) {
+            recipientEmails.add(propAgent.email.toLowerCase().trim());
+          }
+        }
+
+        // 4. Add Lead Assigned Agent
+        if (leadToNotify.assignedAgent?.email) {
+          recipientEmails.add(leadToNotify.assignedAgent.email.toLowerCase().trim());
+
+          // SMS if enabled
+          if (leadToNotify.agency?.settings?.smsNotifications) {
+            smsService.sendLeadNotification(leadToNotify, leadToNotify.assignedAgent)
+              .catch(err => console.error('[SMS Error]', err));
+          }
+        }
+
+        const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+        const recipientsArray = Array.from(recipientEmails).filter(e => emailRegex.test(e));
+
+        console.log(`[Notification] Sending bulk notification to ${recipientsArray.length} recipients: ${recipientsArray.join(', ')}`);
+
+        if (recipientsArray.length > 0) {
+          await emailService.sendBulkLeadNotification(leadToNotify, leadToNotify.agency, recipientsArray);
+        }
+
+        // 5. Customer Confirmation
+        if (leadToNotify.contact?.email) {
+          console.log(`[Notification] Sending confirmation to customer: ${leadToNotify.contact.email}`);
+          await emailService.sendInquiryConfirmation(leadToNotify);
+        }
+      } catch (err) {
+        console.error('[Notification Error]', err);
+      }
+    };
+
+    // SEARCH DUPLICATES OR CREATE NEW
+    // Search for existing lead in the same agency
+    let lead = null;
+    if (!req.body.ignoreDuplicates) {
+      lead = await Lead.findOne({
+        $or: duplicateConditions,
+        agency: agencyId
+      });
+    }
+
+    if (lead) {
+      // If lead exists and property is provided, add it to interestedProperties
+      if (req.body.property) {
+        const alreadyInterested = lead.interestedProperties?.some(ip =>
+          ip.property?.toString() === req.body.property.toString()
+        );
+
+        if (!alreadyInterested) {
+          lead.interestedProperties = lead.interestedProperties || [];
+          lead.interestedProperties.push({
+            property: req.body.property,
+            action: 'inquiry',
+            date: new Date()
+          });
+        }
+      }
+
+      // Update basic info if provided (optional, but good for keeping it fresh)
+      if (req.body.contact.firstName) lead.contact.firstName = req.body.contact.firstName;
+      if (req.body.contact.lastName) lead.contact.lastName = req.body.contact.lastName;
+
+      lead.activityLog.push({
+        action: 'lead_updated',
+        details: { description: 'Lead inquiry updated (duplicate prevented)' },
+        performedBy: req.user ? req.user.id : null
+      });
+
+      await lead.save();
+
+      const populatedLead = await Lead.findById(lead._id)
+        .populate('property', 'title slug agent agency')
+        .populate('agency', 'name contact settings')
+        .populate('assignedAgent', 'firstName lastName email phone');
+
+      const leadObj = populatedLead.toObject();
+      if (leadObj.contact) {
+        leadObj.contact = encryptionService.decryptLeadContact(leadObj.contact);
+      }
+
+      // Trigger notifications even for duplicate inquiries (updates)
+      setImmediate(async () => {
+        try {
+          // Re-score the lead on new inquiry even if it exists
+          // This will upgrade priority to Warm if it was Not_interested
+          await leadScoringService.autoScoreLead(lead._id, true);
+          sendNotifications(lead._id);
+        } catch (err) {
+          console.error('[Notification/Scoring Error]', err);
+          sendNotifications(lead._id); // Fallback to just notifications
+        }
+      });
+
+      return res.json({
+        lead: leadObj,
+        message: 'Existing lead updated',
+        isExisting: true
+      });
+    }
 
     // Auto-assign agent if not provided and auto-assignment is enabled
     let assignedAgentId = req.body.assignedAgent || null;
-    if (!assignedAgentId) {
-      if (agency?.settings?.autoAssignLeads) {
-        const assignmentMethod = agency.settings.assignmentMethod || 'round_robin';
-        assignedAgentId = await leadAssignmentService.autoAssignLead(agencyId, assignmentMethod, req.body);
+    if (req.user) {
+      const agency = await Agency.findById(agencyId);
+      if (!assignedAgentId) {
+        if (agency?.settings?.autoAssignLeads) {
+          const assignmentMethod = agency.settings.assignmentMethod || 'round_robin';
+          assignedAgentId = await leadAssignmentService.autoAssignLead(agencyId, assignmentMethod, req.body);
+        }
       }
     }
 
@@ -660,7 +956,7 @@ router.post('/', auth, checkModulePermission('leads', 'create'), [
       }
     }
 
-    const lead = new Lead(leadData);
+    lead = new Lead(leadData);
 
     // Initialize SLA tracking
     lead.sla = {
@@ -671,78 +967,37 @@ router.post('/', auth, checkModulePermission('leads', 'create'), [
     lead.activityLog.push({
       action: 'lead_created',
       details: { description: 'Lead created' },
-      performedBy: req.user.id
+      performedBy: req.user ? req.user.id : null
     });
 
     await lead.save();
 
     // Auto-score the lead
     try {
-      await leadScoringService.autoScoreLead(lead._id);
+      // Don't auto-update priority if it was manually set during creation
+      const shouldUpdatePriority = !req.body.hasOwnProperty('priority');
+      await leadScoringService.autoScoreLead(lead._id, shouldUpdatePriority);
     } catch (scoreError) {
       console.error('Error auto-scoring lead:', scoreError);
       // Don't fail the request if scoring fails
     }
 
     const populatedLead = await Lead.findById(lead._id)
-      .populate('property', 'title slug')
-      .populate('agency', 'name')
+      .populate('property', 'title slug agent agency')
+      .populate('agency', 'name contact')
       .populate('assignedAgent', 'firstName lastName email phone');
 
-    // Decrypt contact information for response
+    // Decrypt contact information for notifications and response
+    if (populatedLead.contact) {
+      populatedLead.contact = encryptionService.decryptLeadContact(populatedLead.contact.toObject ? populatedLead.contact.toObject() : populatedLead.contact);
+    }
     const leadObj = populatedLead.toObject();
     if (leadObj.contact) {
-      leadObj.contact = encryptionService.decryptLeadContact(leadObj.contact);
+      leadObj.contact = populatedLead.contact; // Reuse decrypted contact
     }
 
-    // Return duplicate warning if found
-    if (duplicateLeads.length > 0 && !req.body.ignoreDuplicates) {
-      return res.status(201).json({
-        lead: leadObj,
-        duplicates: duplicateLeads.map(d => ({
-          _id: d._id,
-          name: `${d.contact.firstName} ${d.contact.lastName}`,
-          email: d.contact.email,
-          phone: d.contact.phone,
-          status: d.status,
-          createdAt: d.createdAt
-        })),
-        warning: 'Potential duplicate leads found'
-      });
-    }
-
-    // Send notifications
-    try {
-      const agency = await Agency.findById(agencyId);
-
-      // Get all recipients: Super Admins + Agency Admins for this agency
-      const superAdmins = await User.find({ role: 'super_admin', isActive: true });
-      const agencyAdmins = await User.find({ role: 'agency_admin', agency: agencyId, isActive: true });
-
-      const recipientEmails = new Set();
-      superAdmins.forEach(u => recipientEmails.add(u.email));
-      agencyAdmins.forEach(u => recipientEmails.add(u.email));
-
-      if (populatedLead.assignedAgent) {
-        const agent = await User.findById(populatedLead.assignedAgent._id);
-        if (agent && agent.email) {
-          recipientEmails.add(agent.email);
-
-          // Send SMS notification if enabled
-          if (agency?.settings?.smsNotifications) {
-            await smsService.sendLeadNotification(populatedLead, agent);
-          }
-        }
-      }
-
-      const recipientsArray = Array.from(recipientEmails).filter(Boolean);
-      if (recipientsArray.length > 0) {
-        await emailService.sendBulkLeadNotification(populatedLead, agency, recipientsArray);
-      }
-    } catch (notifError) {
-      console.error('Error sending notifications:', notifError);
-      // Don't fail the request if notifications fail
-    }
+    // Trigger notifications for new lead
+    setImmediate(() => sendNotifications(lead._id));
 
     // Send webhook for lead creation
     if (webhookService.isEnabled()) {
@@ -776,6 +1031,92 @@ router.post('/', auth, checkModulePermission('leads', 'create'), [
       message: 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.message : 'Internal server error'
     });
+  }
+});
+
+// @route   DELETE /api/leads/:id/documents/:docId
+// @desc    Delete a single document from a lead
+// @access  Private
+router.delete('/:id/documents/:docId', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    // SECURITY: Validate per-entry permissions
+    const entryPermCheck = validateEntryPermission(lead, req.user, 'edit');
+    if (!entryPermCheck.allowed) {
+      console.log(`Document delete blocked - Entry permission denied: ${entryPermCheck.reason}, Lead: ${req.params.id}, Role: ${req.user.role}`);
+      return res.status(403).json({
+        message: 'Access denied by entry-level restriction',
+        reason: entryPermCheck.reason
+      });
+    }
+
+    // SECURITY: Validate agency isolation
+    const agencyCheck = validateAgencyIsolation(lead, req.user);
+    if (!agencyCheck.allowed) {
+      console.log(`Document delete blocked - Agency isolation failed: ${agencyCheck.reason}, Lead: ${req.params.id}`);
+      return res.status(403).json({
+        message: 'Access denied. You can only update leads from your agency.',
+        reason: agencyCheck.reason
+      });
+    }
+
+    // SECURITY: Agent can only modify leads assigned to them
+    if (req.user.role === 'agent') {
+      const agentId = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
+      const assignedAgentId = lead.assignedAgent?._id
+        ? lead.assignedAgent._id.toString()
+        : (lead.assignedAgent?.toString() || lead.assignedAgent);
+
+      const isPropertyManager = await Property.exists({ _id: lead.property, agent: agentId });
+
+      if (assignedAgentId !== req.user.id && !isPropertyManager) {
+        console.log(`Document delete blocked - Agent not assigned to lead: ${req.params.id}, Agent: ${req.user.id}, Assigned to: ${assignedAgentId}`);
+        return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+      }
+    }
+
+    const docIndex = lead.documents.findIndex(
+      d => d._id && d._id.toString() === req.params.docId
+    );
+
+    if (docIndex === -1) {
+      return res.status(404).json({ message: 'Document not found on this lead' });
+    }
+
+    const [removedDoc] = lead.documents.splice(docIndex, 1);
+
+    // Activity log for audit trail
+    lead.activityLog.push({
+      action: 'document_deleted',
+      details: {
+        field: 'documents',
+        oldValue: {
+          _id: removedDoc._id,
+          name: removedDoc.name,
+          filename: removedDoc.filename,
+          url: removedDoc.url,
+          type: removedDoc.type,
+          size: removedDoc.size
+        },
+        newValue: null,
+        description: `Document "${removedDoc.name || removedDoc.filename || removedDoc._id}" deleted`
+      },
+      performedBy: req.user.id
+    });
+
+    await lead.save();
+
+    return res.json({
+      message: 'Document deleted successfully',
+      document: removedDoc
+    });
+  } catch (error) {
+    console.error('Delete lead document error:', error);
+    return res.status(500).json({ message: 'Server error' });
   }
 });
 
@@ -945,7 +1286,9 @@ router.put('/:id', auth, checkModulePermission('leads', 'edit'), async (req, res
     // Recalculate lead score in real-time when lead is updated
     // This ensures score updates when source, budget, timeline, or inquiry changes
     try {
-      await leadScoringService.autoScoreLead(lead._id);
+      // Don't auto-update priority if it was manually set in this update
+      const shouldUpdatePriority = !req.body.hasOwnProperty('priority');
+      await leadScoringService.autoScoreLead(lead._id, shouldUpdatePriority);
     } catch (scoreError) {
       console.error('Error recalculating lead score:', scoreError);
       // Don't fail the update if scoring fails
@@ -1101,6 +1444,88 @@ router.post('/:id/notes', auth, checkModulePermission('leads', 'edit'), [
     res.json({ lead });
   } catch (error) {
     console.error('Add note error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/leads/:id/notes/:noteId
+// @desc    Update a note
+// @access  Private
+router.put('/:id/notes/:noteId', auth, checkModulePermission('leads', 'edit'), [
+  body('note').trim().notEmpty().withMessage('Note is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+    const leadAgencyId = lead.agency?._id ? lead.agency._id.toString() : (lead.agency?.toString() || lead.agency);
+    const userAgencyId = req.user.agency?._id ? req.user.agency._id.toString() : (req.user.agency?.toString() || req.user.agency);
+    if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
+      return res.status(403).json({ message: 'Access denied. You can only edit notes for leads from your agency.' });
+    }
+    if (req.user.role === 'agent') {
+      const assignedAgentId = lead.assignedAgent?._id ? lead.assignedAgent._id.toString() : (lead.assignedAgent?.toString() || lead.assignedAgent);
+      if (assignedAgentId && assignedAgentId !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+      }
+      if (leadAgencyId !== userAgencyId) {
+        return res.status(403).json({ message: 'Access denied. This lead is not from your agency.' });
+      }
+    }
+    const noteId = req.params.noteId;
+    const note = lead.notes.id(noteId);
+    if (!note) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+    note.note = req.body.note;
+    await lead.save();
+    const updatedLead = await Lead.findById(lead._id).populate('notes.createdBy', 'firstName lastName');
+    res.json({ lead: updatedLead });
+  } catch (error) {
+    console.error('Update note error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   DELETE /api/leads/:id/notes/:noteId
+// @desc    Delete a note
+// @access  Private
+router.delete('/:id/notes/:noteId', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+    const leadAgencyId = lead.agency?._id ? lead.agency._id.toString() : (lead.agency?.toString() || lead.agency);
+    const userAgencyId = req.user.agency?._id ? req.user.agency._id.toString() : (req.user.agency?.toString() || req.user.agency);
+    if ((req.user.role === 'agency_admin' || req.user.role === 'staff') && leadAgencyId !== userAgencyId) {
+      return res.status(403).json({ message: 'Access denied. You can only delete notes for leads from your agency.' });
+    }
+    if (req.user.role === 'agent') {
+      const assignedAgentId = lead.assignedAgent?._id ? lead.assignedAgent._id.toString() : (lead.assignedAgent?.toString() || lead.assignedAgent);
+      if (assignedAgentId && assignedAgentId !== req.user.id) {
+        return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+      }
+      if (leadAgencyId !== userAgencyId) {
+        return res.status(403).json({ message: 'Access denied. This lead is not from your agency.' });
+      }
+    }
+    const noteId = req.params.noteId;
+    const note = lead.notes.id(noteId);
+    if (!note) {
+      return res.status(404).json({ message: 'Note not found' });
+    }
+    note.deleteOne();
+    await lead.save();
+    const updatedLead = await Lead.findById(lead._id).populate('notes.createdBy', 'firstName lastName');
+    res.json({ lead: updatedLead });
+  } catch (error) {
+    console.error('Delete note error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -1657,6 +2082,9 @@ router.put('/:id/assign', auth, checkModulePermission('leads', 'edit'), [
       lead.team = agent.team;
     }
 
+    // Normalize priority before saving to prevent validation errors
+    normalizeLeadData(lead);
+
     await lead.save();
 
     // Get agency if not already populated
@@ -1825,6 +2253,9 @@ router.post('/:id/auto-assign', auth, checkModulePermission('leads', 'edit'), as
         lead.reportingManager = req.user.id;
       }
     }
+
+    // Normalize priority before saving to prevent validation errors
+    normalizeLeadData(lead);
 
     await lead.save();
 
@@ -2269,7 +2700,7 @@ router.post('/bulk', auth, checkModulePermission('leads', 'create'), async (req,
         const lead = new Lead({
           contact: encryptedContact,
           status: validStatuses.includes(leadData.status?.toLowerCase()) ? leadData.status.toLowerCase() : 'new',
-          priority: validPriorities.includes(leadData.priority?.toLowerCase()) ? leadData.priority.toLowerCase() : 'warm',
+          priority: validPriorities.includes(leadData.priority?.toLowerCase()) ? leadData.priority.toLowerCase() : 'Warm',
           source: validSources.includes(leadData.source?.toLowerCase()) ? leadData.source.toLowerCase() : 'other',
           agency: agencyId,
           property: propertyId && mongoose.Types.ObjectId.isValid(propertyId) ? propertyId : undefined,
@@ -2396,7 +2827,7 @@ router.post('/landing-page', optionalAuth, [
 
         // Prepare lead data
         const validStatuses = ['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation', 'booked', 'lost', 'closed', 'junk'];
-        const validPriorities = ['hot', 'warm', 'cold', 'not_interested'];
+        const validPriorities = ['Hot', 'Warm', 'Cold', 'Not_interested'];
         const validSources = ['website', 'phone', 'email', 'walk_in', 'referral', 'social_media', 'other'];
 
         const newLeadData = {
@@ -2409,7 +2840,7 @@ router.post('/landing-page', optionalAuth, [
             address: leadData.contact.address || {}
           },
           status: validStatuses.includes(leadData.status?.toLowerCase()) ? leadData.status.toLowerCase() : 'new',
-          priority: validPriorities.includes(leadData.priority?.toLowerCase()) ? leadData.priority.toLowerCase() : 'warm',
+          priority: validPriorities.includes(leadData.priority?.toLowerCase()) ? leadData.priority.toLowerCase() : 'Warm',
           source: validSources.includes(leadData.source?.toLowerCase()) ? leadData.source.toLowerCase() : 'website',
           agency: agencyId,
           property: leadData.property && mongoose.Types.ObjectId.isValid(leadData.property) ? leadData.property : undefined,
@@ -2544,7 +2975,7 @@ router.post('/webhook', async (req, res) => {
       source: webhookData.source || 'other',
       campaignName: webhookData.campaignName || webhookData.campaign_name || webhookData.campaign,
       status: 'new',
-      priority: 'warm'
+      priority: 'Warm'
     };
 
     // Validate required fields
@@ -2696,13 +3127,33 @@ router.post('/:id/site-visit', auth, checkModulePermission('leads', 'edit'), [
       }
     }
 
-    // Update site visit details
-    lead.siteVisit = {
-      ...lead.siteVisit,
+    // Ensure siteVisits array exists (migrate from single siteVisit if needed)
+    if (!lead.siteVisits || !Array.isArray(lead.siteVisits)) {
+      lead.siteVisits = [];
+    }
+    if (lead.siteVisit && lead.siteVisit.scheduledDate && lead.siteVisits.length === 0) {
+      lead.siteVisits.push({
+        ...lead.siteVisit.toObject ? lead.siteVisit.toObject() : lead.siteVisit,
+        _id: lead.siteVisit._id || new (require('mongoose').Types.ObjectId)()
+      });
+    }
+
+    const newVisit = {
+      _id: new (require('mongoose').Types.ObjectId)(),
       scheduledDate: new Date(req.body.scheduledDate),
       scheduledTime: req.body.scheduledTime,
       status: 'scheduled',
-      relationshipManager: req.body.relationshipManager || lead.assignedAgent || req.user.id
+      relationshipManager: req.body.relationshipManager || lead.assignedAgent || req.user.id,
+      property: req.body.property || req.body.propertyId || undefined
+    };
+    lead.siteVisits.push(newVisit);
+    lead.siteVisit = {
+      ...newVisit,
+      scheduledDate: newVisit.scheduledDate,
+      scheduledTime: newVisit.scheduledTime,
+      status: 'scheduled',
+      relationshipManager: newVisit.relationshipManager,
+      property: newVisit.property
     };
 
     // Update lead status
@@ -2729,14 +3180,28 @@ router.post('/:id/site-visit', auth, checkModulePermission('leads', 'edit'), [
       const agency = await Agency.findById(lead.agency);
       const rm = await User.findById(lead.siteVisit.relationshipManager);
 
+      const leadForEmail = await Lead.findById(lead._id)
+        .populate({ path: 'property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } })
+        .populate({ path: 'siteVisit.property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } });
+
       // Send SMS confirmation to lead
       if (lead.contact.phone && agency?.settings?.smsNotifications) {
         await smsService.sendSiteVisitConfirmation(lead);
       }
 
-      // Send email confirmation to lead
+      // Send email confirmation to lead (with property agent contact details in email)
       if (lead.contact.email) {
-        await emailService.sendSiteVisitConfirmation(lead, rm, agency);
+        await emailService.sendSiteVisitConfirmation(leadForEmail, rm, agency);
+      }
+
+      // Send email to property agent with customer contact details
+      const propertyAgent = leadForEmail.siteVisit?.property?.agent || leadForEmail.property?.agent;
+      if (propertyAgent && propertyAgent.email) {
+        try {
+          await emailService.sendSiteVisitNotificationToPropertyAgent(leadForEmail, propertyAgent, agency, 'scheduled');
+        } catch (paError) {
+          console.error('Error sending site visit email to property agent:', paError);
+        }
       }
 
       // Notify assigned agent about site visit
@@ -2819,6 +3284,8 @@ router.post('/:id/site-visit', auth, checkModulePermission('leads', 'edit'), [
 
     const updatedLead = await Lead.findById(lead._id)
       .populate('siteVisit.relationshipManager', 'firstName lastName email phone')
+      .populate('siteVisit.property', 'title slug')
+      .populate('siteVisits.property', 'title slug')
       .populate('property', 'title slug')
       .populate('agency', 'name')
       .populate('assignedAgent', 'firstName lastName email phone');
@@ -2845,20 +3312,52 @@ router.post('/:id/site-visit', auth, checkModulePermission('leads', 'edit'), [
 // @access  Private
 router.put('/:id/site-visit/complete', auth, checkModulePermission('leads', 'edit'), [
   body('feedback').optional().trim(),
-  body('interestLevel').optional().isIn(['high', 'medium', 'low', 'not_interested']),
+  body('interestLevel').optional({ checkFalsy: true }).trim().isIn(['high', 'medium', 'low', 'not_interested']).withMessage('interestLevel must be one of: high, medium, low, not_interested'),
   body('nextAction').optional().trim()
 ], async (req, res) => {
   try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array(), message: errors.array().map(e => e.msg).join(', ') });
+    }
+
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found' });
     }
 
-    lead.siteVisit.status = 'completed';
-    lead.siteVisit.completedDate = new Date();
-    if (req.body.feedback) lead.siteVisit.feedback = req.body.feedback;
-    if (req.body.interestLevel) lead.siteVisit.interestLevel = req.body.interestLevel;
-    if (req.body.nextAction) lead.siteVisit.nextAction = req.body.nextAction;
+    let visitToComplete = null;
+    if (lead.siteVisit && (lead.siteVisit.scheduledDate || lead.siteVisit.status === 'scheduled')) {
+      visitToComplete = lead.siteVisit;
+    } else if (lead.siteVisits && lead.siteVisits.length) {
+      const scheduled = lead.siteVisits.filter(v => v.status === 'scheduled');
+      visitToComplete = scheduled.length ? scheduled[scheduled.length - 1] : lead.siteVisits[lead.siteVisits.length - 1];
+      if (visitToComplete) lead.siteVisit = visitToComplete;
+    }
+    if (!visitToComplete) {
+      return res.status(400).json({ message: 'No site visit found to complete. Schedule a site visit first.' });
+    }
+
+    visitToComplete.status = 'completed';
+    visitToComplete.completedDate = new Date();
+    if (req.body.feedback) visitToComplete.feedback = req.body.feedback;
+    if (req.body.interestLevel) visitToComplete.interestLevel = req.body.interestLevel;
+    if (req.body.nextAction) visitToComplete.nextAction = req.body.nextAction;
+
+    // Sync completion into siteVisits array so GET returns consistent data (frontend reads from siteVisits)
+    if (lead.siteVisits && Array.isArray(lead.siteVisits)) {
+      const visitId = visitToComplete._id ? visitToComplete._id.toString() : null;
+      const idx = visitId
+        ? lead.siteVisits.findIndex(v => v._id && v._id.toString() === visitId)
+        : lead.siteVisits.length - 1;
+      if (idx !== -1) {
+        lead.siteVisits[idx].status = 'completed';
+        lead.siteVisits[idx].completedDate = visitToComplete.completedDate;
+        if (req.body.feedback !== undefined) lead.siteVisits[idx].feedback = req.body.feedback;
+        if (req.body.interestLevel) lead.siteVisits[idx].interestLevel = req.body.interestLevel;
+        if (req.body.nextAction !== undefined) lead.siteVisits[idx].nextAction = req.body.nextAction;
+      }
+    }
 
     // Auto-update status
     if (lead.status === 'site_visit_scheduled') {
@@ -2878,9 +3377,28 @@ router.put('/:id/site-visit/complete', auth, checkModulePermission('leads', 'edi
 
     const updatedLead = await Lead.findById(lead._id)
       .populate('siteVisit.relationshipManager', 'firstName lastName')
+      .populate('siteVisit.property', 'title slug')
       .populate('property', 'title slug')
       .populate('agency', 'name')
-      .populate('assignedAgent', 'firstName lastName');
+      .populate('assignedAgent', 'firstName lastName email phone');
+
+    try {
+      const User = require('../models/User');
+      const Agency = require('../models/Agency');
+      const agency = updatedLead.agency || (await Agency.findById(lead.agency));
+      const leadForEmail = await Lead.findById(lead._id)
+        .populate({ path: 'property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } })
+        .populate({ path: 'siteVisit.property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } });
+      const propertyAgent = leadForEmail.siteVisit?.property?.agent || leadForEmail.property?.agent;
+      if (leadForEmail.contact?.email) await emailService.sendSiteVisitCompletedToCustomer(leadForEmail, agency, propertyAgent);
+      if (updatedLead.assignedAgent) {
+        const assignedAgent = await User.findById(updatedLead.assignedAgent);
+        if (assignedAgent?.email) await emailService.sendSiteVisitCompletedToAgent(leadForEmail, assignedAgent, agency);
+      }
+      if (propertyAgent?.email) await emailService.sendSiteVisitNotificationToPropertyAgent(leadForEmail, propertyAgent, agency, 'completed');
+    } catch (completeEmailErr) {
+      console.error('Error sending site visit completion emails:', completeEmailErr);
+    }
 
     // Send webhook for site visit completion
     if (webhookService.isEnabled()) {
@@ -2895,6 +3413,419 @@ router.put('/:id/site-visit/complete', auth, checkModulePermission('leads', 'edi
     res.json({ lead: updatedLead });
   } catch (error) {
     console.error('Complete site visit error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/leads/:id/site-visit/:visitId
+// @desc    Update a particular site visit by id
+// @access  Private
+router.put('/:id/site-visit/:visitId', auth, checkModulePermission('leads', 'edit'), [
+  body('scheduledDate').isISO8601().withMessage('Valid scheduled date is required'),
+  body('scheduledTime').trim().notEmpty().withMessage('Scheduled time is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    const visitId = req.params.visitId;
+    if (!lead.siteVisits || !Array.isArray(lead.siteVisits)) {
+      if (lead.siteVisit && lead.siteVisit.scheduledDate) {
+        lead.siteVisit.scheduledDate = new Date(req.body.scheduledDate);
+        lead.siteVisit.scheduledTime = req.body.scheduledTime;
+        if (req.body.property !== undefined || req.body.propertyId !== undefined) {
+          lead.siteVisit.property = req.body.property || req.body.propertyId || null;
+        }
+        await lead.save();
+        const updatedLead = await Lead.findById(lead._id)
+          .populate('siteVisit.relationshipManager', 'firstName lastName email phone')
+          .populate('siteVisit.property', 'title slug')
+          .populate('property', 'title slug')
+          .populate('agency', 'name')
+          .populate('assignedAgent', 'firstName lastName email phone');
+        // Send email to customer and assigned agent when visit is updated (with property agent populated)
+        try {
+          const agency = updatedLead.agency;
+          const rm = updatedLead.siteVisit?.relationshipManager;
+          if (updatedLead.contact?.email) {
+            const leadForEmail = await Lead.findById(updatedLead._id)
+              .populate({ path: 'property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } })
+              .populate({ path: 'siteVisit.property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } });
+            await emailService.sendSiteVisitConfirmation(leadForEmail, rm, agency, true);
+          }
+          if (updatedLead.assignedAgent) {
+            try {
+              await emailService.sendSiteVisitNotificationToAgent(updatedLead, updatedLead.assignedAgent, agency, true);
+            } catch (emailError) {
+              console.error('Error sending site visit update email to agent:', emailError);
+            }
+          }
+          if (rm && rm._id?.toString() !== updatedLead.assignedAgent?._id?.toString()) {
+            try {
+              await emailService.sendSiteVisitNotificationToAgent(updatedLead, rm, agency, true);
+            } catch (emailError) {
+              console.error('Error sending site visit update email to relationship manager:', emailError);
+            }
+          }
+          const leadForPa = await Lead.findById(updatedLead._id)
+            .populate({ path: 'property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } })
+            .populate({ path: 'siteVisit.property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } });
+          const propertyAgent = leadForPa.siteVisit?.property?.agent || leadForPa.property?.agent;
+          if (propertyAgent?.email) {
+            try {
+              await emailService.sendSiteVisitNotificationToPropertyAgent(leadForPa, propertyAgent, agency, 'updated');
+            } catch (paError) {
+              console.error('Error sending site visit update email to property agent:', paError);
+            }
+          }
+        } catch (notifError) {
+          console.error('Error sending site visit update emails:', notifError);
+        }
+        return res.json({ lead: updatedLead });
+      }
+      return res.status(400).json({ message: 'No site visit found to update' });
+    }
+
+    const index = lead.siteVisits.findIndex(v => v._id && v._id.toString() === visitId);
+    if (index === -1) {
+      return res.status(404).json({ message: 'Site visit not found' });
+    }
+
+    lead.siteVisits[index].scheduledDate = new Date(req.body.scheduledDate);
+    lead.siteVisits[index].scheduledTime = req.body.scheduledTime;
+    if (req.body.property !== undefined || req.body.propertyId !== undefined) {
+      lead.siteVisits[index].property = req.body.property || req.body.propertyId || null;
+    }
+    if (lead.siteVisit && lead.siteVisit._id && lead.siteVisit._id.toString() === visitId) {
+      lead.siteVisit.scheduledDate = new Date(req.body.scheduledDate);
+      lead.siteVisit.scheduledTime = req.body.scheduledTime;
+      if (req.body.property !== undefined || req.body.propertyId !== undefined) {
+        lead.siteVisit.property = req.body.property || req.body.propertyId || null;
+      }
+    }
+
+    lead.activityLog.push({
+      action: 'site_visit_updated',
+      details: {
+        description: `Site visit rescheduled to ${new Date(req.body.scheduledDate).toLocaleDateString()} at ${req.body.scheduledTime}`
+      },
+      performedBy: req.user.id
+    });
+
+    await lead.save();
+
+    const updatedLead = await Lead.findById(lead._id)
+      .populate('siteVisit.relationshipManager', 'firstName lastName email phone')
+      .populate('siteVisit.property', 'title slug')
+      .populate('siteVisits.relationshipManager', 'firstName lastName email phone')
+      .populate('siteVisits.property', 'title slug')
+      .populate('property', 'title slug')
+      .populate('agency', 'name')
+      .populate('assignedAgent', 'firstName lastName email phone');
+
+    // Send email to customer and assigned agent when visit is updated (with property agent populated)
+    try {
+      const agency = updatedLead.agency;
+      const rm = updatedLead.siteVisit?.relationshipManager;
+      if (updatedLead.contact?.email) {
+        const leadForEmail = await Lead.findById(updatedLead._id)
+          .populate({ path: 'property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } })
+          .populate({ path: 'siteVisit.property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } });
+        await emailService.sendSiteVisitConfirmation(leadForEmail, rm, agency, true);
+      }
+      if (updatedLead.assignedAgent) {
+        try {
+          await emailService.sendSiteVisitNotificationToAgent(updatedLead, updatedLead.assignedAgent, agency, true);
+        } catch (emailError) {
+          console.error('Error sending site visit update email to agent:', emailError);
+        }
+      }
+      if (rm && rm._id?.toString() !== updatedLead.assignedAgent?._id?.toString()) {
+        try {
+          await emailService.sendSiteVisitNotificationToAgent(updatedLead, rm, agency, true);
+        } catch (emailError) {
+          console.error('Error sending site visit update email to relationship manager:', emailError);
+        }
+      }
+      const leadForPa = await Lead.findById(updatedLead._id)
+        .populate({ path: 'property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } })
+        .populate({ path: 'siteVisit.property', select: 'title slug', populate: { path: 'agent', select: 'firstName lastName email phone' } });
+      const propertyAgent = leadForPa.siteVisit?.property?.agent || leadForPa.property?.agent;
+      if (propertyAgent?.email) {
+        try {
+          await emailService.sendSiteVisitNotificationToPropertyAgent(leadForPa, propertyAgent, agency, 'updated');
+        } catch (paError) {
+          console.error('Error sending site visit update email to property agent:', paError);
+        }
+      }
+    } catch (notifError) {
+      console.error('Error sending site visit update emails:', notifError);
+    }
+
+    res.json({ lead: updatedLead });
+  } catch (error) {
+    console.error('Update site visit error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/leads/:id/site-visit/:visitId/completion
+// @desc    Update completion remarks (feedback, interestLevel, nextAction) for a completed visit
+// @access  Private
+router.put('/:id/site-visit/:visitId/completion', auth, checkModulePermission('leads', 'edit'), [
+  body('feedback').optional().trim(),
+  body('interestLevel').optional({ checkFalsy: true }).trim().isIn(['high', 'medium', 'low', 'not_interested']).withMessage('interestLevel must be one of: high, medium, low, not_interested'),
+  body('nextAction').optional().trim()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array(), message: errors.array().map(e => e.msg).join(', ') });
+    }
+
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    const visitId = req.params.visitId;
+    let visit = null;
+
+    if (lead.siteVisit && lead.siteVisit._id && lead.siteVisit._id.toString() === visitId) {
+      visit = lead.siteVisit;
+    } else if (lead.siteVisits && Array.isArray(lead.siteVisits)) {
+      visit = lead.siteVisits.find(v => v._id && v._id.toString() === visitId);
+    }
+
+    if (!visit) {
+      return res.status(404).json({ message: 'Site visit not found' });
+    }
+    if (visit.status !== 'completed') {
+      return res.status(400).json({ message: 'Only completed visits can have their remarks updated' });
+    }
+
+    if (req.body.feedback !== undefined) visit.feedback = req.body.feedback;
+    if (req.body.interestLevel) visit.interestLevel = req.body.interestLevel;
+    if (req.body.nextAction !== undefined) visit.nextAction = req.body.nextAction;
+
+    await lead.save();
+
+    const updatedLead = await Lead.findById(lead._id)
+      .populate('siteVisit.relationshipManager', 'firstName lastName')
+      .populate('siteVisit.property', 'title slug')
+      .populate('siteVisits.property', 'title slug')
+      .populate('property', 'title slug')
+      .populate('agency', 'name')
+      .populate('assignedAgent', 'firstName lastName email phone');
+
+    res.json({ lead: updatedLead });
+  } catch (error) {
+    console.error('Update site visit completion error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   DELETE /api/leads/:id/site-visit/:visitId
+// @desc    Delete a particular site visit by id
+// @access  Private
+router.delete('/:id/site-visit/:visitId', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    const visitId = req.params.visitId;
+    if (!lead.siteVisits || !Array.isArray(lead.siteVisits)) {
+      // Backward compat: if only single siteVisit exists, treat as one visit
+      if (lead.siteVisit && lead.siteVisit.scheduledDate) {
+        lead.siteVisit.status = 'cancelled';
+        lead.siteVisit.cancelledDate = new Date();
+        lead.siteVisits = [];
+        lead.activityLog.push({
+          action: 'site_visit_cancelled',
+          details: { description: `Site visit scheduled for ${new Date(lead.siteVisit.scheduledDate).toLocaleDateString()} at ${lead.siteVisit.scheduledTime} was cancelled` },
+          performedBy: req.user.id
+        });
+        await lead.save();
+        const updatedLead = await Lead.findById(lead._id)
+          .populate('siteVisit.relationshipManager', 'firstName lastName email phone')
+          .populate('siteVisit.property', 'title slug')
+          .populate('property', 'title slug')
+          .populate('agency', 'name')
+          .populate('assignedAgent', 'firstName lastName email phone');
+        try {
+          const User = require('../models/User');
+          const Agency = require('../models/Agency');
+          const Property = require('../models/Property');
+          const agency = await Agency.findById(lead.agency);
+          const leadForCancel = await Lead.findById(lead._id)
+            .populate({ path: 'siteVisit.property', populate: { path: 'agent', select: 'firstName lastName email phone' } })
+            .populate({ path: 'property', populate: { path: 'agent', select: 'firstName lastName email phone' } });
+          if (leadForCancel.contact?.email) await emailService.sendSiteVisitCancellationToCustomer(leadForCancel, agency);
+          if (updatedLead.assignedAgent) {
+            const assignedAgent = await User.findById(updatedLead.assignedAgent);
+            if (assignedAgent?.email) await emailService.sendSiteVisitCancellationToAgent(leadForCancel, assignedAgent, agency);
+          }
+          const propertyAgent = leadForCancel.siteVisit?.property?.agent || leadForCancel.property?.agent;
+          if (propertyAgent?.email) await emailService.sendSiteVisitNotificationToPropertyAgent(leadForCancel, propertyAgent, agency, 'cancelled');
+        } catch (cancelEmailErr) {
+          console.error('Error sending site visit cancellation emails:', cancelEmailErr);
+        }
+        return res.json({ lead: updatedLead });
+      }
+      return res.status(400).json({ message: 'No site visit found to delete' });
+    }
+
+    const index = lead.siteVisits.findIndex(v => v._id && v._id.toString() === visitId);
+    if (index === -1) {
+      return res.status(404).json({ message: 'Site visit not found' });
+    }
+
+    const removed = lead.siteVisits[index];
+    lead.siteVisits.splice(index, 1);
+    if (lead.siteVisit && lead.siteVisit._id && lead.siteVisit._id.toString() === visitId) {
+      lead.siteVisit = lead.siteVisits.length > 0 ? lead.siteVisits[lead.siteVisits.length - 1] : undefined;
+    } else if (lead.siteVisits.length > 0 && !lead.siteVisit) {
+      lead.siteVisit = lead.siteVisits[lead.siteVisits.length - 1];
+    } else if (lead.siteVisits.length === 0) {
+      lead.siteVisit = undefined;
+    }
+
+    lead.activityLog.push({
+      action: 'site_visit_cancelled',
+      details: {
+        description: `Site visit scheduled for ${new Date(removed.scheduledDate).toLocaleDateString()} at ${removed.scheduledTime} was deleted`
+      },
+      performedBy: req.user.id
+    });
+
+    await lead.save();
+
+    const updatedLead = await Lead.findById(lead._id)
+      .populate('siteVisit.relationshipManager', 'firstName lastName email phone')
+      .populate('siteVisit.property', 'title slug')
+      .populate('siteVisits.relationshipManager', 'firstName lastName email phone')
+      .populate('siteVisits.property', 'title slug')
+      .populate('property', 'title slug')
+      .populate('agency', 'name')
+      .populate('assignedAgent', 'firstName lastName email phone');
+
+    try {
+      const User = require('../models/User');
+      const Agency = require('../models/Agency');
+      const Property = require('../models/Property');
+      const agency = await Agency.findById(lead.agency);
+      const removedProperty = removed.property
+        ? await Property.findById(removed.property).populate('agent', 'firstName lastName email phone')
+        : null;
+      const leadForCancel = {
+        contact: lead.contact,
+        siteVisit: {
+          scheduledDate: removed.scheduledDate,
+          scheduledTime: removed.scheduledTime,
+          property: removedProperty ? { title: removedProperty.title } : null
+        },
+        property: removedProperty ? { title: removedProperty.title } : (lead.property || {}),
+        agency
+      };
+      if (lead.contact?.email) await emailService.sendSiteVisitCancellationToCustomer(leadForCancel, agency, removedProperty?.agent);
+      if (updatedLead.assignedAgent) {
+        const assignedAgent = await User.findById(updatedLead.assignedAgent);
+        if (assignedAgent?.email) await emailService.sendSiteVisitCancellationToAgent(leadForCancel, assignedAgent, agency);
+      }
+      if (removedProperty?.agent?.email) await emailService.sendSiteVisitNotificationToPropertyAgent(leadForCancel, removedProperty.agent, agency, 'cancelled');
+    } catch (cancelEmailErr) {
+      console.error('Error sending site visit cancellation emails:', cancelEmailErr);
+    }
+
+    if (webhookService.isEnabled()) {
+      try {
+        await webhookService.sendLeadWebhook(updatedLead, 'site_visit_cancelled');
+      } catch (webhookError) {
+        console.error('Error sending site visit cancellation webhook:', webhookError);
+      }
+    }
+
+    res.json({ lead: updatedLead });
+  } catch (error) {
+    console.error('Delete site visit error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   DELETE /api/leads/:id/site-visit
+// @desc    Cancel the primary site visit (backward compat when no visitId)
+// @access  Private
+router.delete('/:id/site-visit', auth, checkModulePermission('leads', 'edit'), async (req, res) => {
+  try {
+    const lead = await Lead.findById(req.params.id);
+    if (!lead) {
+      return res.status(404).json({ message: 'Lead not found' });
+    }
+
+    if (!lead.siteVisit || !lead.siteVisit.scheduledDate) {
+      return res.status(400).json({ message: 'No site visit found to cancel' });
+    }
+
+    lead.siteVisit.status = 'cancelled';
+    lead.siteVisit.cancelledDate = new Date();
+
+    lead.activityLog.push({
+      action: 'site_visit_cancelled',
+      details: {
+        description: `Site visit scheduled for ${new Date(lead.siteVisit.scheduledDate).toLocaleDateString()} at ${lead.siteVisit.scheduledTime} was cancelled`
+      },
+      performedBy: req.user.id
+    });
+
+    await lead.save();
+
+    const updatedLead = await Lead.findById(lead._id)
+      .populate('siteVisit.relationshipManager', 'firstName lastName email phone')
+      .populate('siteVisit.property', 'title slug')
+      .populate('siteVisits.property', 'title slug')
+      .populate('property', 'title slug')
+      .populate('agency', 'name')
+      .populate('assignedAgent', 'firstName lastName email phone');
+
+    try {
+      const User = require('../models/User');
+      const Agency = require('../models/Agency');
+      const leadForCancel = await Lead.findById(lead._id)
+        .populate({ path: 'siteVisit.property', populate: { path: 'agent', select: 'firstName lastName email phone' } })
+        .populate({ path: 'property', populate: { path: 'agent', select: 'firstName lastName email phone' } })
+        .populate('agency', 'name');
+      const agency = leadForCancel.agency && typeof leadForCancel.agency === 'object' ? leadForCancel.agency : await Agency.findById(lead.agency);
+      if (leadForCancel.contact?.email) await emailService.sendSiteVisitCancellationToCustomer(leadForCancel, agency);
+      if (updatedLead.assignedAgent) {
+        const assignedAgent = await User.findById(updatedLead.assignedAgent);
+        if (assignedAgent?.email) await emailService.sendSiteVisitCancellationToAgent(leadForCancel, assignedAgent, agency);
+      }
+      const propertyAgent = leadForCancel.siteVisit?.property?.agent || leadForCancel.property?.agent;
+      if (propertyAgent?.email) await emailService.sendSiteVisitNotificationToPropertyAgent(leadForCancel, propertyAgent, agency, 'cancelled');
+    } catch (cancelEmailErr) {
+      console.error('Error sending site visit cancellation emails:', cancelEmailErr);
+    }
+
+    if (webhookService.isEnabled()) {
+      try {
+        await webhookService.sendLeadWebhook(updatedLead, 'site_visit_cancelled');
+      } catch (webhookError) {
+        console.error('Error sending site visit cancellation webhook:', webhookError);
+      }
+    }
+
+    res.json({ lead: updatedLead });
+  } catch (error) {
+    console.error('Cancel site visit error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

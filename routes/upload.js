@@ -4,6 +4,9 @@ const fs = require('fs');
 const multer = require('multer');
 const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 const { uploadSingle, uploadMultiple, uploadFields, deleteFile, getFileUrl, uploadDirs } = require('../middleware/upload');
+const Lead = require('../models/Lead');
+const encryptionService = require('../services/encryptionService');
+const emailService = require('../services/emailService');
 
 const router = express.Router();
 
@@ -198,7 +201,7 @@ router.post('/profile-image', [
 router.delete('/:filename', auth, async (req, res) => {
   try {
     const { filename } = req.params;
-    const { type } = req.query; // 'property', 'profile', 'cms'
+    const { type } = req.query; // 'property', 'profile', 'cms', 'lead'
     
     let filePath;
     switch (type) {
@@ -210,6 +213,9 @@ router.delete('/:filename', auth, async (req, res) => {
         break;
       case 'cms':
         filePath = path.join('uploads/cms', filename);
+        break;
+      case 'lead':
+        filePath = path.join('uploads/leads/documents', filename);
         break;
       default:
         return res.status(400).json({ message: 'Invalid file type' });
@@ -354,7 +360,7 @@ router.post('/lead-documents', [
     }
   });
 
-  upload.array('documents', 10)(req, res, (err) => {
+  upload.array('documents', 10)(req, res, async (err) => {
     if (err instanceof multer.MulterError) {
       if (err.code === 'LIMIT_FILE_SIZE') {
         return res.status(400).json({ message: 'File too large. Maximum size is 10MB.' });
@@ -382,6 +388,26 @@ router.post('/lead-documents', [
         filename: file.filename
       };
     });
+
+    // If leadId provided, send uploaded documents to customer email
+    const leadId = req.body?.leadId;
+    if (leadId && files.length > 0) {
+      try {
+        const lead = await Lead.findById(leadId)
+          .populate('property', 'title')
+          .populate('agency', 'name')
+          .lean();
+        if (lead) {
+          const decryptedContact = encryptionService.decryptLeadContact(lead.contact);
+          const leadForEmail = { ...lead, contact: decryptedContact };
+          const filePaths = req.files.map(f => f.path);
+          await emailService.sendDocumentUploadedToCustomer(leadForEmail, files, filePaths);
+        }
+      } catch (emailErr) {
+        console.error('Failed to send document email to customer:', emailErr);
+        // Do not fail the upload response; documents are already saved
+      }
+    }
 
     res.json({
       message: 'Documents uploaded successfully',

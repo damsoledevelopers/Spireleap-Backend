@@ -216,12 +216,19 @@ router.post('/', auth, checkModulePermission('agencies', 'create'), [
 
         await agencyAdmin.save();
 
-        // Send welcome email
+        // Send account creation email with credentials
         try {
+          console.log('📧 Attempting to send agency admin creation email to:', agencyAdmin.email);
           const emailService = require('../services/emailService');
-          await emailService.sendWelcomeEmail(agencyAdmin);
+
+          // Prepare user object with agency data for email
+          const adminWithAgency = agencyAdmin.toObject();
+          adminWithAgency.agency = { name: agencyData.name };
+
+          await emailService.sendAccountCreatedNotification(adminWithAgency, password);
+          console.log('✅ Agency admin creation email sent successfully');
         } catch (emailError) {
-          console.error('Failed to send welcome email:', emailError);
+          console.error('❌ Failed to send account creation email:', emailError);
           // Don't fail agency creation if email fails
         }
       } catch (userError) {
@@ -332,6 +339,21 @@ router.put('/:id', auth, checkModulePermission('agencies', 'edit'), async (req, 
         });
 
         await newAgencyAdmin.save();
+
+        // Send account creation email with credentials
+        try {
+          console.log('📧 Attempting to send new agency admin creation email to:', newAgencyAdmin.email);
+          const emailService = require('../services/emailService');
+
+          // Prepare user object with agency data for email
+          const adminWithAgency = newAgencyAdmin.toObject();
+          adminWithAgency.agency = { name: agency.name };
+
+          await emailService.sendAccountCreatedNotification(adminWithAgency, password);
+          console.log('✅ New agency admin creation email sent successfully');
+        } catch (emailError) {
+          console.error('❌ Failed to send account creation email:', emailError);
+        }
       }
     }
 

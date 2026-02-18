@@ -2,6 +2,7 @@ const express = require('express');
 const { body, validationResult, query } = require('express-validator');
 const Settings = require('../models/Settings');
 const { auth, authorize, checkModulePermission } = require('../middleware/auth');
+const emailService = require('../services/emailService');
 
 const router = express.Router();
 
@@ -65,20 +66,49 @@ router.put('/', [
 
     const updates = [];
     const settings = req.body.settings;
+    let emailSettingsUpdated = false;
 
     for (const [key, value] of Object.entries(settings)) {
+      // Infers category from the key (e.g., "email.smtpHost" => "email")
+      let category = 'general';
+      if (key.includes('.')) {
+        const prefix = key.split('.')[0];
+        const validCategories = ['general', 'email', 'security', 'notifications', 'system', 'sms', 'payment', 'lead_stages'];
+        if (validCategories.includes(prefix)) {
+          category = prefix;
+        }
+      }
+
       const update = await Settings.findOneAndUpdate(
         { key },
         {
           value,
+          category,
           updatedBy: req.user.id
         },
         {
           upsert: true,
-          new: true
+          new: true,
+          setDefaultsOnInsert: true
         }
       );
       updates.push(update);
+
+      // Check if any email settings were updated (support both naming conventions)
+      if (key.startsWith('smtp_') || key.startsWith('email.smtp') || update.category === 'email') {
+        emailSettingsUpdated = true;
+      }
+    }
+
+    // Reinitialize email service if email settings were updated
+    if (emailSettingsUpdated) {
+      console.log('Settings: Email settings updated, reinitializing email service...');
+      try {
+        await emailService.reinitialize();
+        console.log('Settings: Email service reinitialized successfully');
+      } catch (error) {
+        console.error('Settings: Error reinitializing email service:', error);
+      }
     }
 
     res.json({
@@ -116,6 +146,17 @@ router.put('/:key', [
         new: true
       }
     );
+
+    // Reinitialize email service if email setting was updated (support both naming conventions)
+    if (req.params.key.startsWith('smtp_') || req.params.key.startsWith('email.smtp') || setting.category === 'email') {
+      console.log('Settings: Email setting updated, reinitializing email service...');
+      try {
+        await emailService.reinitialize();
+        console.log('Settings: Email service reinitialized successfully');
+      } catch (error) {
+        console.error('Settings: Error reinitializing email service:', error);
+      }
+    }
 
     res.json({
       message: 'Setting updated successfully',

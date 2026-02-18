@@ -1,5 +1,6 @@
 const Razorpay = require('razorpay');
 const stripe = require('stripe');
+const PDFDocument = require('pdfkit');
 const Payment = require('../models/Payment');
 const Transaction = require('../models/Transaction');
 const Lead = require('../models/Lead');
@@ -125,7 +126,7 @@ class PaymentService {
       }
 
       payment.status = status;
-      
+
       if (gatewayData.paymentId) {
         payment.gatewayPaymentId = gatewayData.paymentId;
       }
@@ -153,10 +154,46 @@ class PaymentService {
 
         // Update lead booking status
         const lead = await Lead.findById(payment.lead);
-        if (lead && lead.booking) {
+        if (lead) {
+          if (!lead.booking) {
+            lead.booking = {};
+          }
+
           lead.booking.agreementStatus = 'signed';
-          lead.status = 'booked';
+
+          if (transaction && (transaction.status === 'completed' || payment.status === 'completed')) {
+            // If transaction is completed, the lead status effectively becomes closed/won, but we keep 'booked' or move to 'customer'
+            lead.status = 'booked';
+            // Also update property if not already set correctly
+            if (transaction.property && (!lead.property || lead.property.toString() !== transaction.property.toString())) {
+              lead.property = transaction.property;
+            }
+          }
           await lead.save();
+        }
+
+        // Update Property Status to 'sold' or 'rented'
+        if (transaction && transaction.property) {
+          const Property = require('../models/Property');
+          const property = await Property.findById(transaction.property);
+          if (property) {
+            if (transaction.type === 'sale') {
+              property.status = 'sold';
+            } else if (transaction.type === 'rent') {
+              property.status = 'rented';
+            }
+            await property.save();
+          }
+        }
+
+        // Send confirmation email to customer
+        try {
+          const emailService = require('./emailService');
+          const Property = require('../models/Property');
+          const property = await Property.findById(payment.property);
+          await emailService.sendPaymentSuccessEmail(payment, lead, property);
+        } catch (emailError) {
+          console.error('Failed to send payment success email:', emailError);
         }
       }
 
@@ -242,8 +279,6 @@ class PaymentService {
         throw new Error('Payment not found');
       }
 
-      // This would use PDFKit to generate receipt
-      // For now, return receipt data
       return {
         paymentId: payment._id,
         receiptNumber: payment.receipt?.number || `RCP-${payment._id}`,
@@ -259,6 +294,128 @@ class PaymentService {
       console.error('Receipt generation error:', error);
       throw error;
     }
+  }
+
+  /**
+   * Generate PDF Receipt - designed to match the Transaction Details modal (invoice layout).
+   * @param {string} paymentId
+   * @param {{ asBuffer?: boolean }} opts - If asBuffer: true, returns Promise<Buffer> (for email attachment).
+   */
+  async generateReceiptPDF(paymentId, opts = {}) {
+    try {
+      const payment = await Payment.findById(paymentId)
+        .populate({
+          path: 'transaction',
+          populate: { path: 'property' }
+        })
+        .populate('lead')
+        .populate('property')
+        .populate('agency');
+
+      if (!payment) {
+        throw new Error('Payment not found');
+      }
+
+      const transaction = payment.transaction;
+      const lead = payment.lead;
+      const property = payment.property || transaction?.property;
+      const agency = payment.agency;
+
+      const doc = new PDFDocument({ margin: 50, size: 'A4' });
+      const path = require('path');
+      const fs = require('fs');
+      const pageWidth = doc.page.width - 100;
+      const left = 50;
+      const GRAY_400 = '#9ca3af';
+      const GRAY_700 = '#374151';
+      const GRAY_900 = '#111827';
+
+      let y = 50;
+
+      // 1. Simple NovaKeys logo at top
+      const logoPath = path.join(__dirname, '../..', 'Spireleap-frontend/public/Novakeys.png');
+      if (fs.existsSync(logoPath)) {
+        doc.image(logoPath, left, y, { width: 56, height: 56 });
+        doc.fontSize(18).fillColor(GRAY_900).text('NovaKeys', left + 65, y + 16);
+      } else {
+        doc.rect(left, y, 56, 56).fillAndStroke('#700E08', '#700E08');
+        doc.fillColor('#ffffff').fontSize(24).text('N', left + 18, y + 18, { width: 24, align: 'center' });
+        doc.fillColor(GRAY_900).fontSize(18).text('NovaKeys', left + 65, y + 16);
+      }
+      y += 70;
+
+      // 2. Customer details
+      doc.fontSize(10).fillColor(GRAY_400).text('Customer', left, y);
+      y += 16;
+      const custName = lead?.contact ? `${lead.contact.firstName || ''} ${lead.contact.lastName || ''}`.trim() || 'Customer' : 'Customer';
+      doc.fontSize(12).fillColor(GRAY_900).text(custName || 'Customer', left, y);
+      const email = lead?.contact?.email || '';
+      const phone = lead?.contact?.phone || '';
+      if (email) { y += 16; doc.fontSize(10).fillColor(GRAY_700).text(email, left, y); }
+      if (phone) { y += 14; doc.fontSize(10).fillColor(GRAY_700).text(phone, left, y); }
+      y += 28;
+
+      // 3. Property basic details
+      doc.fontSize(10).fillColor(GRAY_400).text('Property', left, y);
+      y += 16;
+      doc.fontSize(12).fillColor(GRAY_900).text(property?.title || 'Property', left, y);
+      y += 16;
+      const location = property?.location?.city || property?.location?.address || property?.location?.state || '—';
+      doc.fontSize(10).fillColor(GRAY_700).text(location, left, y);
+      y += 14;
+      const transType = transaction?.type || 'sale';
+      doc.fontSize(10).fillColor(GRAY_700).text(`Type: ${transType.charAt(0).toUpperCase() + transType.slice(1)}`, left, y);
+      y += 32;
+
+      // 4. Transaction details: total amount, due amount, receipt ID
+      doc.fontSize(10).fillColor(GRAY_400).text('Transaction details', left, y);
+      y += 20;
+
+      const currency = payment.currency || 'INR';
+      const formatAmount = (n) => `${currency === 'INR' ? '₹' : currency + ' '}${Number(n || 0).toLocaleString()}`;
+      const totalAmount = Number(transaction?.amount ?? payment.amount ?? 0);
+      const paymentDetails = transaction?.paymentDetails;
+      const dueAmount = paymentDetails?.dueAmount ?? Math.max(0, totalAmount - (paymentDetails?.amountPaid ?? (payment.status === 'completed' ? Number(payment.amount ?? 0) : 0)));
+      const receiptId = payment.receipt?.number || transaction?._id?.toString().slice(-8).toUpperCase() || payment._id?.toString().slice(-8).toUpperCase() || 'N/A';
+
+      doc.fontSize(11).fillColor(GRAY_700).text('Total amount', left, y);
+      doc.fontSize(11).fillColor(GRAY_900).text(formatAmount(totalAmount), left + 120, y);
+      y += 22;
+
+      doc.fontSize(11).fillColor(GRAY_700).text('Due amount', left, y);
+      doc.fontSize(11).fillColor(GRAY_900).text(formatAmount(dueAmount), left + 120, y);
+      y += 22;
+
+      doc.fontSize(11).fillColor(GRAY_700).text('Receipt ID', left, y);
+      doc.fontSize(11).fillColor(GRAY_900).text(receiptId, left + 120, y);
+      y += 40;
+
+      // Minimal footer
+      doc.fontSize(9).fillColor(GRAY_400).text('Thank you. For queries, contact your agent or agency.', left, y, { width: pageWidth });
+
+      if (opts.asBuffer) {
+        const chunks = [];
+        doc.on('data', (chunk) => chunks.push(chunk));
+        const bufferPromise = new Promise((resolve, reject) => {
+          doc.on('end', () => resolve(Buffer.concat(chunks)));
+          doc.on('error', reject);
+        });
+        doc.end();
+        return bufferPromise;
+      }
+      doc.end();
+      return doc;
+    } catch (error) {
+      console.error('PDF generation error:', error);
+      throw error;
+    }
+  }
+
+  /**
+   * Same receipt PDF as portal download, returned as Buffer for email attachment.
+   */
+  async generateReceiptPDFBuffer(paymentId) {
+    return this.generateReceiptPDF(paymentId, { asBuffer: true });
   }
 }
 

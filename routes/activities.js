@@ -10,7 +10,7 @@ const router = express.Router();
 // @access  Private
 router.get('/', auth, [
   query('page').optional().isInt({ min: 1 }),
-  query('limit').optional().isInt({ min: 1, max: 100 }),
+  query('limit').optional().isInt({ min: 1, max: 2000 }),
   query('entityType').optional(),
   query('entityId').optional(),
   query('type').optional(),

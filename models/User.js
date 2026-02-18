@@ -110,7 +110,50 @@ const userSchema = new mongoose.Schema({
     },
     date: Date,
     version: String
-  }
+  },
+  // Embedded Arrays for User Management
+  tasks: [{
+    title: { type: String, required: true },
+    description: String,
+    taskType: {
+      type: String,
+      enum: ['call', 'email', 'meeting', 'site_visit', 'other'],
+      default: 'other'
+    },
+    dueDate: Date,
+    priority: {
+      type: String,
+      enum: ['low', 'medium', 'high'],
+      default: 'medium'
+    },
+    status: {
+      type: String,
+      enum: ['pending', 'in_progress', 'completed', 'overdue'],
+      default: 'pending'
+    },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now },
+    completedAt: Date
+  }],
+  reminders: [{
+    title: { type: String, required: true },
+    description: String,
+    reminderDate: { type: Date, required: true },
+    isCompleted: { type: Boolean, default: false },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now }
+  }],
+  notes: [{
+    note: { type: String, required: true },
+    createdBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    createdAt: { type: Date, default: Date.now }
+  }],
+  activityLog: [{
+    action: { type: String, required: true },
+    details: String,
+    performedBy: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    timestamp: { type: Date, default: Date.now }
+  }]
 }, {
   timestamps: true
 });

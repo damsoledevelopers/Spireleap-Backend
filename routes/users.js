@@ -3,6 +3,9 @@ const { body, validationResult, param } = require('express-validator');
 const mongoose = require('mongoose');
 const User = require('../models/User');
 const UserPermission = require('../models/UserPermission');
+const Lead = require('../models/Lead');
+const Transaction = require('../models/Transaction');
+const Property = require('../models/Property');
 const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 const emailService = require('../services/emailService');
 const Agency = require('../models/Agency');
@@ -46,15 +49,20 @@ router.post('/', [
       isActive = true
     } = req.body;
 
-    // Agency Admin restrictions
-    if (req.user.role === 'agency_admin') {
-      // Can only create agents or staff (or generic users)
-      if (['super_admin', 'agency_admin'].includes(role)) {
-        return res.status(403).json({ message: 'Agency admins can only create agents or staff' });
+    // Agency Admin/Agent/Staff restrictions
+    if (['agency_admin', 'agent', 'staff'].includes(req.user.role)) {
+      // Non-super admins cannot create super admins
+      if (role === 'super_admin') {
+        return res.status(403).json({ message: 'You do not have permission to create super admins' });
       }
+
+      // Agency admins cannot create other agency admins (usually)
+      if (req.user.role === 'agency_admin' && role === 'agency_admin') {
+        return res.status(403).json({ message: 'Agency admins cannot create other agency admins' });
+      }
+
       // Force agency to be their own
       if (agency && agency !== req.user.agency.toString()) {
-        // If they tried to pass a different agency
         return res.status(403).json({ message: 'You can only create users for your own agency' });
       }
     }
@@ -74,8 +82,7 @@ router.post('/', [
       phone,
       address,
       role,
-      role,
-      agency: req.user.role === 'agency_admin' ? req.user.agency : (agency || null),
+      agency: ['agency_admin', 'agent', 'staff'].includes(req.user.role) ? req.user.agency : (agency || null),
       isActive
     };
 
@@ -89,13 +96,25 @@ router.post('/', [
     // Send welcome email with credentials in background
     setImmediate(async () => {
       try {
+        console.log('📧 Attempting to send account creation email to:', user.email);
         const agencyData = user.agency ? await Agency.findById(user.agency).select('name') : null;
         const userWithAgency = user.toObject();
         userWithAgency.agency = agencyData;
 
+        console.log('📧 User data prepared for email:', {
+          email: userWithAgency.email,
+          role: userWithAgency.role,
+          agency: agencyData?.name || 'No agency'
+        });
+
         await emailService.sendAccountCreatedNotification(userWithAgency, password);
+        console.log('✅ Account creation email sent successfully to:', user.email);
       } catch (emailError) {
-        console.error('Error sending account creation email:', emailError);
+        console.error('❌ Error sending account creation email:', emailError);
+        console.error('❌ Error details:', {
+          message: emailError.message,
+          stack: emailError.stack
+        });
       }
     });
 
@@ -303,6 +322,66 @@ router.put('/:id/permissions', auth, authorize('super_admin'), async (req, res) 
   }
 });
 
+// @route   GET /api/users/:id/confirmed-properties
+// @desc    Get properties the customer has confirmed (completed transactions) with documents per property (for user view Documents tab)
+// @access  Private
+router.get('/:id/confirmed-properties', auth, checkModulePermission('leads', 'view'), async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id).select('email').lean();
+    if (!user || !user.email) {
+      return res.status(404).json({ message: 'User not found or has no email' });
+    }
+    const emailRegex = new RegExp('^' + (user.email || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '$', 'i');
+    const customerLeads = await Lead.find({ 'contact.email': emailRegex })
+      .select('_id property documents')
+      .populate('property', 'title slug location')
+      .populate('documents.uploadedBy', 'firstName lastName')
+      .lean();
+    const leadIds = customerLeads.map((l) => l._id);
+    const completedTransactions = await Transaction.find({
+      lead: { $in: leadIds },
+      status: 'completed'
+    })
+      .populate('property', 'title slug location')
+      .sort({ transactionDate: -1 })
+      .lean();
+    const seenPropertyIds = new Set();
+    const confirmedProperties = [];
+    for (const tx of completedTransactions) {
+      if (!tx.property || !tx.property._id) continue;
+      const propId = tx.property._id.toString();
+      if (seenPropertyIds.has(propId)) continue;
+      seenPropertyIds.add(propId);
+      const docsWithLeadId = [];
+      let primaryLeadId = null;
+      for (const lead of customerLeads) {
+        const leadPropId = (lead.property && (lead.property._id || lead.property)) && (lead.property._id || lead.property).toString();
+        if (leadPropId !== propId) continue;
+        if (!primaryLeadId) primaryLeadId = lead._id;
+        const docs = lead.documents || [];
+        docs.forEach((doc) => {
+          docsWithLeadId.push({ leadId: lead._id, doc });
+        });
+      }
+      // Use transaction's lead if no matching lead found - ensures docs go to correct property
+      const txLeadId = tx.lead?._id || tx.lead;
+      const effectiveLeadId = primaryLeadId || txLeadId || null;
+      if (!effectiveLeadId) continue; // Skip if we can't determine the correct lead
+      confirmedProperties.push({
+        property: tx.property,
+        propertyKey: propId,
+        primaryLeadId: effectiveLeadId,
+        documents: docsWithLeadId,
+        isCurrentLead: true
+      });
+    }
+    res.json({ confirmedProperties });
+  } catch (error) {
+    console.error('Get confirmed properties error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // @route   GET /api/users/:id
 // @desc    Get single user
 // @access  Private
@@ -329,11 +408,16 @@ router.get('/:id', [
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
 
+    console.log('🔍 Fetching user with ID:', req.params.id);
+
     const user = await User.findById(req.params.id)
       .select('-password')
       .populate('agency', 'name logo');
 
+    console.log('👤 User found:', user ? `${user.firstName} ${user.lastName}` : 'NOT FOUND');
+
     if (!user) {
+      console.log('❌ User not found for ID:', req.params.id);
       return res.status(404).json({ message: 'User not found' });
     }
 
@@ -367,20 +451,32 @@ router.get('/:id', [
       return res.json(user);
     }
 
-    // Agency admin can only view users from their agency
-    if (req.user.role === 'agency_admin') {
-      if (!requestingUserAgencyId || targetUserAgencyId !== requestingUserAgencyId) {
-        return res.status(403).json({ message: 'Not authorized to view this user' });
-      }
-      return res.json(user);
-    }
-
     // Users can view their own profile
     if (req.user.id === req.params.id) {
       return res.json(user);
     }
 
+    // Agency admin can view users from their agency
+    if (req.user.role === 'agency_admin') {
+      if (requestingUserAgencyId && targetUserAgencyId === requestingUserAgencyId) {
+        return res.json(user);
+      }
+    }
+
+    // Check if user has users.view permission (for user management)
+    const UserPermission = require('../models/UserPermission');
+    const userPermission = await UserPermission.findOne({ user: req.user.id });
+    if (userPermission && userPermission.permissions?.users?.view) {
+      return res.json(user);
+    }
+
+    // Check if user has leads.view permission (for viewing user details from leads context)
+    if (userPermission && userPermission.permissions?.leads?.view) {
+      return res.json(user);
+    }
+
     // All other cases: deny access
+    console.log('❌ Access denied for user:', req.user.id, 'to view user:', req.params.id);
     return res.status(403).json({ message: 'Not authorized to view this user' });
   } catch (error) {
     console.error('Get user error:', error);
@@ -411,152 +507,144 @@ router.put('/:id', [
   body('email').optional().isEmail().normalizeEmail(),
   body('phone').optional().trim(),
   body('password').optional().isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
-  body('address').optional()
+  body('address').optional(),
+  body('isActive').optional().isBoolean()
 ], async (req, res) => {
   try {
+    const { id } = req.params;
+
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
+      console.warn('Update user validation failed:', errors.array());
       return res.status(400).json({ errors: errors.array() });
     }
 
-    // Additional safety check
-    if (!req.params.id || !mongoose.Types.ObjectId.isValid(req.params.id)) {
-      return res.status(400).json({ message: 'Invalid user ID format' });
-    }
-
-    const user = await User.findById(req.params.id);
+    // 1. Fetch user first
+    const user = await User.findById(id).select('+password');
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
     }
 
     const oldRole = user.role;
 
-    // Check access permissions
-    // Get user agency ID (handle both populated object and ID string)
-    const targetUserAgencyId = user.agency?._id
-      ? user.agency._id.toString()
-      : (user.agency?.toString() || user.agency);
+    // 2. Permission logic
+    const isSelf = req.user.id === id;
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const isAgencyAdmin = req.user.role === 'agency_admin';
 
-    // Get requesting user agency ID (handle both populated object and ID string)
-    const requestingUserAgencyId = req.user.agency?._id
-      ? req.user.agency._id.toString()
-      : (req.user.agency?.toString() || req.user.agency);
+    // Get user agency ID safely
+    const targetUserAgencyId = user.agency?._id ? user.agency._id.toString() : (user.agency?.toString() || user.agency);
+    const requestingUserAgencyId = req.user.agency; // Already a string or null from auth middleware
 
-    if (req.user.role === 'agency_admin') {
+    if (isAgencyAdmin) {
+      // Agency admin can only update users in their agency
       if (targetUserAgencyId !== requestingUserAgencyId) {
-        return res.status(403).json({ message: 'Not authorized to update this user' });
+        return res.status(403).json({ message: 'Not authorized to update this user (Agency Mismatch)' });
       }
       // Agency admin cannot change role to super_admin
       if (req.body.role === 'super_admin') {
         delete req.body.role;
       }
-    } else if (req.user.role !== 'super_admin' && req.user.id !== req.params.id) {
+    } else if (!isSuperAdmin && !isSelf) {
       return res.status(403).json({ message: 'Not authorized to update this user' });
     }
 
-    // Prevent role changes for non-super-admins
-    if (req.user.role !== 'super_admin' && req.body.role) {
-      delete req.body.role;
+    // 3. Filter and Prepare Update Data
+    // We explicitly pick fields to avoid any illegal fields like _id, __v, etc.
+    const allowedFields = ['firstName', 'lastName', 'email', 'phone', 'isActive', 'role', 'agency', 'address', 'staffInfo', 'agentInfo', 'tasks', 'reminders', 'notes', 'activityLog'];
+    const updateData = {};
+
+    Object.keys(req.body).forEach(key => {
+      if (allowedFields.includes(key) && req.body[key] !== undefined) {
+        updateData[key] = req.body[key];
+      }
+    });
+
+    // Special handling for role
+    if (!isSuperAdmin && updateData.role) {
+      delete updateData.role;
     }
 
-    // Only super_admin and agency_admin (for their agency's agents) can change passwords for other users
-    // Regular users can only change their own password via the password endpoint
+    // Special handling for password
+    let passwordUpdated = false;
     if (req.body.password) {
-      if (req.user.role === 'super_admin') {
-        // Super admin can change any user's password
-      } else if (req.user.role === 'agency_admin' && targetUserAgencyId === requestingUserAgencyId) {
-        // Agency admin can change passwords for users in their agency
-      } else if (req.user.id === req.params.id) {
-        // Users can change their own password
-      } else {
-        // Not authorized to change this user's password
-        delete req.body.password;
+      const canChangePassword = isSuperAdmin || (isAgencyAdmin && targetUserAgencyId === requestingUserAgencyId) || isSelf;
+      if (canChangePassword) {
+        user.password = req.body.password;
+        passwordUpdated = true;
       }
     }
 
-    // Prepare update data
-    const updateData = { ...req.body };
-
-    // If password is provided, we need to use .save() to trigger the pre-save hook for hashing
-    // Otherwise, we can use findByIdAndUpdate for better performance
-    if (updateData.password) {
-      // Fetch the user document to use .save() which triggers password hashing
-      const userToUpdate = await User.findById(req.params.id);
-      if (!userToUpdate) {
-        return res.status(404).json({ message: 'User not found' });
-      }
-
-      // Update all fields
-      Object.keys(updateData).forEach(key => {
-        if (key === 'password') {
-          // Set password directly - pre-save hook will hash it
-          userToUpdate.password = updateData.password;
-        } else if (key === 'address' && updateData.address) {
-          // Merge address object
-          userToUpdate.address = { ...userToUpdate.address, ...updateData.address };
+    // 4. Perform Update
+    if (passwordUpdated) {
+      // If password changed, we must use .save() to trigger pre-save hook
+      Object.entries(updateData).forEach(([key, value]) => {
+        if (key === 'address' && value && typeof value === 'object') {
+          // Flatten address update to avoid subdocument spreading issues
+          Object.entries(value).forEach(([addrKey, addrVal]) => {
+            if (addrKey !== '_id') { // Prevent setting _id
+              user.address[addrKey] = addrVal;
+            }
+          });
+        } else if (key === 'staffInfo' || key === 'agentInfo') {
+          if (value && typeof value === 'object') {
+            user[key] = { ...user[key], ...value };
+          }
         } else {
-          userToUpdate[key] = updateData[key];
+          user[key] = value;
         }
       });
-
-      // Save the document - this will trigger the pre-save hook to hash the password
-      await userToUpdate.save();
-
-      // Fetch the updated user without password
-      const updatedUser = await User.findById(req.params.id).select('-password');
-
-      res.json({
-        message: 'User updated successfully',
-        user: updatedUser
-      });
-
-      // Send notifications in background
-      setImmediate(async () => {
-        try {
-          if (updateData.role && updateData.role !== oldRole) {
-            await emailService.sendRoleChangeNotification(updatedUser, oldRole, updateData.role);
-          } else {
-            // If role didn't change, it's a profile update
-            await emailService.sendProfileUpdateNotification(updatedUser);
-          }
-        } catch (emailError) {
-          console.error('Error sending update notification email:', emailError);
-        }
-      });
+      await user.save();
     } else {
-      // No password update, use findByIdAndUpdate for better performance
-      const updatedUser = await User.findByIdAndUpdate(
-        req.params.id,
-        updateData,
-        { new: true, runValidators: true }
-      ).select('-password');
+      // Otherwise use findByIdAndUpdate for better performance
+      // Ensure we don't try to update immutable fields
+      delete updateData._id;
+      delete updateData.__v;
 
-      res.json({
-        message: 'User updated successfully',
-        user: updatedUser
-      });
-
-      // Send notifications in background
-      setImmediate(async () => {
-        try {
-          if (updateData.role && updateData.role !== oldRole) {
-            await emailService.sendRoleChangeNotification(updatedUser, oldRole, updateData.role);
-          } else {
-            // If role didn't change, it's a profile update
-            await emailService.sendProfileUpdateNotification(updatedUser);
-          }
-        } catch (emailError) {
-          console.error('Error sending update notification email:', emailError);
-        }
-      });
+      await User.findByIdAndUpdate(id, { $set: updateData }, { runValidators: true });
     }
+
+    // 5. Return updated user
+    const finalUser = await User.findById(id).select('-password').populate('agency', 'name');
+
+    res.json({
+      message: 'User updated successfully',
+      user: finalUser
+    });
+
+    // 6. Notifications in background
+    setImmediate(async () => {
+      try {
+        if (updateData.role && updateData.role !== oldRole) {
+          await emailService.sendRoleChangeNotification(finalUser, oldRole, updateData.role);
+        } else {
+          await emailService.sendProfileUpdateNotification(finalUser);
+        }
+      } catch (emailError) {
+        console.error('Error sending update notification email:', emailError);
+      }
+    });
+
   } catch (error) {
     console.error('Update user error:', error);
     // Handle CastError (invalid ObjectId)
     if (error.name === 'CastError') {
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
-    res.status(500).json({ message: 'Server error' });
+    // Handle Duplicate Key Error (MongoDB error code 11000)
+    if (error.code === 11000) {
+      const field = Object.keys(error.keyPattern || {})[0] || 'field';
+      return res.status(400).json({ message: `User with this ${field} already exists` });
+    }
+    // Handle Mongoose Validation Error
+    if (error.name === 'ValidationError') {
+      const messages = Object.values(error.errors).map(val => val.message);
+      return res.status(400).json({ message: messages.join(', ') });
+    }
+    res.status(500).json({
+      message: 'Server error',
+      error: process.env.NODE_ENV === 'development' ? error.message : undefined
+    });
   }
 });
 
@@ -762,6 +850,293 @@ router.put('/:id/password', [
     if (error.name === 'CastError') {
       return res.status(400).json({ message: 'Invalid user ID format' });
     }
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ==========================================
+// TASKS ROUTES
+// ==========================================
+
+// @route   POST /api/users/:id/tasks
+// @desc    Add new task
+// @access  Private
+router.post('/:id/tasks', [
+  auth,
+  param('id').custom((value) => {
+    if (!mongoose.Types.ObjectId.isValid(value)) throw new Error('Invalid user ID');
+    return true;
+  }),
+  body('title').trim().notEmpty().withMessage('Title is required'),
+  body('dueDate').optional().toDate(),
+  body('priority').optional().isIn(['low', 'medium', 'high']),
+  body('status').optional().isIn(['pending', 'in_progress', 'completed', 'overdue']),
+  body('taskType').optional().isIn(['call', 'email', 'meeting', 'site_visit', 'other'])
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Authorization
+    const isSelf = req.user.id === user._id.toString();
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const isAgencyAdmin = req.user.role === 'agency_admin' &&
+      user.agency?.toString() === req.user.agency;
+
+    if (!isSelf && !isSuperAdmin && !isAgencyAdmin) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    const newTask = {
+      title: req.body.title,
+      description: req.body.description,
+      taskType: req.body.taskType,
+      dueDate: req.body.dueDate,
+      priority: req.body.priority,
+      status: req.body.status,
+      createdBy: req.user.id
+    };
+
+    user.tasks.push(newTask);
+    await user.save();
+    res.json(user.tasks);
+  } catch (error) {
+    console.error('Add task error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/users/:id/tasks/:taskId
+// @desc    Update task
+// @access  Private
+router.put('/:id/tasks/:taskId', [
+  auth,
+  param('id').custom((value) => mongoose.Types.ObjectId.isValid(value)),
+  param('taskId').custom((value) => mongoose.Types.ObjectId.isValid(value))
+], async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Authorization
+    const isSelf = req.user.id === user._id.toString();
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const isAgencyAdmin = req.user.role === 'agency_admin' &&
+      user.agency?.toString() === req.user.agency;
+
+    if (!isSelf && !isSuperAdmin && !isAgencyAdmin) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    const task = user.tasks.id(req.params.taskId);
+    if (!task) return res.status(404).json({ message: 'Task not found' });
+
+    const fields = ['title', 'description', 'taskType', 'dueDate', 'priority', 'status'];
+    fields.forEach(field => {
+      if (req.body[field] !== undefined) task[field] = req.body[field];
+    });
+
+    if (req.body.status === 'completed' && !task.completedAt) {
+      task.completedAt = new Date();
+    }
+
+    await user.save();
+    res.json(user.tasks);
+  } catch (error) {
+    console.error('Update task error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   DELETE /api/users/:id/tasks/:taskId
+// @desc    Remove task
+// @access  Private
+router.delete('/:id/tasks/:taskId', [
+  auth,
+  param('id').custom((value) => mongoose.Types.ObjectId.isValid(value)),
+  param('taskId').custom((value) => mongoose.Types.ObjectId.isValid(value))
+], async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Authorization
+    const isSelf = req.user.id === user._id.toString();
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const isAgencyAdmin = req.user.role === 'agency_admin' &&
+      user.agency?.toString() === req.user.agency;
+
+    if (!isSelf && !isSuperAdmin && !isAgencyAdmin) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    user.tasks.pull(req.params.taskId);
+    await user.save();
+    res.json(user.tasks);
+  } catch (error) {
+    console.error('Delete task error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ==========================================
+// REMINDERS ROUTES
+// ==========================================
+
+// @route   POST /api/users/:id/reminders
+// @desc    Add new reminder
+// @access  Private
+router.post('/:id/reminders', [
+  auth,
+  param('id').custom((value) => mongoose.Types.ObjectId.isValid(value)),
+  body('title').trim().notEmpty().withMessage('Title is required'),
+  body('reminderDate').notEmpty().withMessage('Date is required').toDate()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Authorization
+    const isSelf = req.user.id === user._id.toString();
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const isAgencyAdmin = req.user.role === 'agency_admin' &&
+      user.agency?.toString() === req.user.agency;
+
+    if (!isSelf && !isSuperAdmin && !isAgencyAdmin) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    const newReminder = {
+      title: req.body.title,
+      description: req.body.description,
+      reminderDate: req.body.reminderDate,
+      isCompleted: req.body.isCompleted || false,
+      createdBy: req.user.id
+    };
+
+    user.reminders.push(newReminder);
+    await user.save();
+    res.json(user.reminders);
+  } catch (error) {
+    console.error('Add reminder error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   PUT /api/users/:id/reminders/:reminderId
+// @desc    Update reminder
+// @access  Private
+router.put('/:id/reminders/:reminderId', [
+  auth,
+  param('id').custom((value) => mongoose.Types.ObjectId.isValid(value)),
+  param('reminderId').custom((value) => mongoose.Types.ObjectId.isValid(value))
+], async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Authorization
+    const isSelf = req.user.id === user._id.toString();
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const isAgencyAdmin = req.user.role === 'agency_admin' &&
+      user.agency?.toString() === req.user.agency;
+
+    if (!isSelf && !isSuperAdmin && !isAgencyAdmin) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    const reminder = user.reminders.id(req.params.reminderId);
+    if (!reminder) return res.status(404).json({ message: 'Reminder not found' });
+
+    if (req.body.title !== undefined) reminder.title = req.body.title;
+    if (req.body.description !== undefined) reminder.description = req.body.description;
+    if (req.body.reminderDate !== undefined) reminder.reminderDate = req.body.reminderDate;
+    if (req.body.isCompleted !== undefined) reminder.isCompleted = req.body.isCompleted;
+
+    await user.save();
+    res.json(user.reminders);
+  } catch (error) {
+    console.error('Update reminder error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   DELETE /api/users/:id/reminders/:reminderId
+// @desc    Remove reminder
+// @access  Private
+router.delete('/:id/reminders/:reminderId', [
+  auth,
+  param('id').custom((value) => mongoose.Types.ObjectId.isValid(value)),
+  param('reminderId').custom((value) => mongoose.Types.ObjectId.isValid(value))
+], async (req, res) => {
+  try {
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Authorization
+    const isSelf = req.user.id === user._id.toString();
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const isAgencyAdmin = req.user.role === 'agency_admin' &&
+      user.agency?.toString() === req.user.agency;
+
+    if (!isSelf && !isSuperAdmin && !isAgencyAdmin) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    user.reminders.pull(req.params.reminderId);
+    await user.save();
+    res.json(user.reminders);
+  } catch (error) {
+    console.error('Delete reminder error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// ==========================================
+// NOTES ROUTES
+// ==========================================
+
+// @route   POST /api/users/:id/notes
+// @desc    Add new note
+// @access  Private
+router.post('/:id/notes', [
+  auth,
+  param('id').custom((value) => mongoose.Types.ObjectId.isValid(value)),
+  body('note').trim().notEmpty().withMessage('Note content is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
+
+    const user = await User.findById(req.params.id);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+
+    // Authorization
+    const isSelf = req.user.id === user._id.toString();
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const isAgencyAdmin = req.user.role === 'agency_admin' &&
+      user.agency?.toString() === req.user.agency;
+
+    if (!isSelf && !isSuperAdmin && !isAgencyAdmin) {
+      return res.status(403).json({ message: 'Not authorized' });
+    }
+
+    const newNote = {
+      note: req.body.note,
+      createdBy: req.user.id
+    };
+
+    user.notes.push(newNote);
+    await user.save();
+    res.json(user.notes);
+  } catch (error) {
+    console.error('Add note error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

@@ -4,6 +4,7 @@ const Property = require('../models/Property');
 const Lead = require('../models/Lead');
 const User = require('../models/User');
 const Agency = require('../models/Agency');
+const Transaction = require('../models/Transaction');
 const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 
 const router = express.Router();
@@ -15,6 +16,7 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
   try {
     const leadFilter = {};
     const propertyFilter = {};
+    const transactionFilter = {};
 
     // Role-based filtering with explicit ObjectId casting for aggregation
     const agencyId = req.user.agency && mongoose.Types.ObjectId.isValid(req.user.agency)
@@ -28,6 +30,7 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
     if (req.user.role === 'agency_admin') {
       leadFilter.agency = agencyId;
       propertyFilter.agency = agencyId;
+      transactionFilter.agency = agencyId;
     } else if (req.user.role === 'agent') {
       // Agents see leads assigned to them OR leads for properties they manage
       const agentProperties = await Property.find({ agent: userId }).distinct('_id');
@@ -44,6 +47,7 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
 
       propertyFilter.agent = userId;
       propertyFilter.agency = agencyId;
+      transactionFilter.agent = userId;
     }
 
     // Use aggregation for efficient counting
@@ -56,7 +60,12 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
       agentStats,
       staffStats,
       inquiryStats,
-      inquiriesByAgency
+      inquiriesByAgency,
+      transactionStats,
+      newAgencies,
+      newProperties,
+      newLeads,
+      newUsers
     ] = await Promise.all([
       // Total agencies (only for super_admin and staff)
       (req.user.role === 'super_admin' || req.user.role === 'staff')
@@ -154,7 +163,30 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
           },
           { $limit: 10 }
         ])
-        : Promise.resolve([])
+        : Promise.resolve([]),
+
+      // Transaction Stats
+      Transaction.aggregate([
+        { $match: transactionFilter },
+        {
+          $group: {
+            _id: null,
+            totalTransactions: { $sum: 1 },
+            completedTransactions: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, 1, 0] } },
+            totalRevenue: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, '$amount', 0] } },
+            totalCommission: { $sum: { $cond: [{ $eq: ['$status', 'completed'] }, { $ifNull: ['$commission.amount', 0] }, 0] } }
+          }
+        }
+      ]),
+
+      // New Today (Last 24h)
+      Agency.countDocuments({ createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
+      Property.countDocuments({ ...propertyFilter, createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
+      Lead.countDocuments({ ...leadFilter, createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
+      User.countDocuments({
+        ...((req.user.role !== 'super_admin' && req.user.role !== 'staff') ? { agency: agencyId } : {}),
+        createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+      })
     ]);
 
     // Format inquiry stats
@@ -178,6 +210,9 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
 
     const agentRes = agentStats[0] || { total: 0, active: 0 };
     const staffRes = staffStats[0] || { total: 0, active: 0 };
+    const transRes = transactionStats[0] || { totalTransactions: 0, completedTransactions: 0, totalRevenue: 0, totalCommission: 0 };
+
+    // Property stats by status
 
     // Property stats by status
     const propertyStatusStats = await Property.aggregate([
@@ -236,7 +271,12 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
       activeStaff: staffRes.active,
       inactiveStaff: staffRes.total - staffRes.active,
       inquiryStats: formattedInquiryStats,
-      inquiriesByAgency
+      inquiriesByAgency,
+      transactions: transRes,
+      newAgencies,
+      newProperties,
+      newLeads,
+      newUsers
     });
   } catch (error) {
     console.error('Get dashboard stats error:', error);
@@ -598,6 +638,88 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
     });
   } catch (error) {
     console.error('Get report stats error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   GET /api/stats/customer
+// @desc    Get statistics for the customer portal
+// @access  Private
+router.get('/customer', auth, async (req, res) => {
+  try {
+    const userEmail = req.user.email;
+    const userId = req.user.id;
+
+    // 1. Get Property Stats (Purchased/Rented) and Transactions
+    // Find leads for this customer
+    const customerLeads = await Lead.find({ 'contact.email': userEmail }).select('_id status');
+    const customerLeadIds = customerLeads.map(l => l._id);
+
+    // Find ALL transactions for these leads (not just completed)
+    const transactions = await mongoose.model('Transaction').find({
+      lead: { $in: customerLeadIds }
+    }).populate('property');
+
+    const purchasedProperties = transactions.filter(t => t.type === 'sale' && t.status === 'completed').length;
+    const rentedProperties = transactions.filter(t => t.type === 'rent' && t.status === 'completed').length;
+    const bookedProperties = transactions.filter(t => t.status === 'pending').length;
+
+    // 2. Get Inquiry Stats (Active Inquiries / Interested)
+    // Filter out leads that have resulted in a COMPLETED transaction
+    const completedTransactionLeadIds = transactions
+      .filter(t => t.status === 'completed')
+      .map(t => t.lead.toString());
+
+    // Also exclude leads that are explicitly 'closed', 'lost', or 'junk'
+    // But include 'booked' if no completed transaction exists (Just Booked = Interested)
+    const totalInquiries = customerLeads.filter(l =>
+      !completedTransactionLeadIds.includes(l._id.toString()) &&
+      !['closed', 'lost', 'junk'].includes(l.status)
+    ).length;
+
+    // 3. Get Wishlist Count (Watchlist)
+    const watchlistCount = await mongoose.model('Watchlist').countDocuments({ user: userId });
+
+    // 4. Get Recent Activity
+    const recentLeads = await Lead.find({
+      'contact.email': userEmail,
+      _id: { $nin: completedTransactionLeadIds }, // Exclude completed leads from recent inquiries list to avoid duplication/confusion
+      status: { $nin: ['closed', 'lost', 'junk'] }
+    })
+      .sort({ createdAt: -1 })
+      .limit(5)
+      .populate('property', 'title images price location')
+      .lean();
+
+    const recentTransactions = transactions
+      .sort((a, b) => new Date(b.transactionDate) - new Date(a.transactionDate))
+      .slice(0, 5);
+
+    res.json({
+      totalInquiries,
+      purchasedProperties,
+      rentedProperties,
+      bookedProperties,
+      watchlistCount,
+      recentActivity: [
+        ...recentLeads.map(l => ({
+          type: 'inquiry',
+          title: `Inquired about ${l.property?.title || 'a property'}`,
+          time: l.createdAt,
+          status: l.status,
+          amount: l.property?.price?.sale || l.property?.price // Optional: Show price
+        })),
+        ...recentTransactions.map(t => ({
+          type: 'transaction',
+          title: `${t.type === 'sale' ? 'Purchased' : (t.type === 'rent' ? 'Rented' : 'Booked')} ${t.property?.title}`,
+          time: t.transactionDate,
+          status: t.status,
+          amount: t.amount
+        }))
+      ].sort((a, b) => new Date(b.time) - new Date(a.time))
+    });
+  } catch (error) {
+    console.error('Get customer stats error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

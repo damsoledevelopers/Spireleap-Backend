@@ -115,12 +115,14 @@ app.use('/api/activities', require('./routes/activities'));
 app.use('/api/saved-searches', require('./routes/savedSearches'));
 app.use('/api/watchlist', require('./routes/watchlist'));
 app.use('/api/payments', require('./routes/payments'));
+app.use('/api/subscriptions', require('./routes/subscriptions'));
 app.use('/api/privacy', require('./routes/privacy'));
 app.use('/api/gdpr', require('./routes/gdpr'));
 app.use('/api/backup', require('./routes/backup'));
 app.use('/api/erp', require('./routes/erp'));
 app.use('/api/stats', require('./routes/stats'));
 app.use('/api/permissions', require('./routes/permissions'));
+app.use('/api/test-email', require('./routes/testEmail'));
 
 // --------------------
 // Health Check
@@ -164,6 +166,9 @@ server.listen(PORT, '0.0.0.0', () => {
   if (process.env.ENABLE_REMINDER_SCHEDULER === 'true' || process.env.NODE_ENV === 'production') {
     const reminderScheduler = require('./schedulers/reminderScheduler');
     reminderScheduler.start();
+
+    const subscriptionScheduler = require('./schedulers/subscriptionScheduler');
+    subscriptionScheduler.start();
   }
 });
 

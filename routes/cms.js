@@ -11,7 +11,9 @@ const Footer = require('../models/Footer');
 const Agency = require('../models/Agency');
 const Script = require('../models/Script');
 const User = require('../models/User');
+const Lead = require('../models/Lead');
 const emailService = require('../services/emailService');
+const leadScoringService = require('../services/leadScoringService');
 const { auth, authorize, optionalAuth, checkModulePermission } = require('../middleware/auth');
 
 const router = express.Router();
@@ -730,6 +732,69 @@ router.post('/contact-messages', [
       if (recipientsArray.length > 0) {
         await emailService.sendContactMessageNotification(populatedMessage, agency, recipientsArray);
       }
+
+      // Send confirmation email to the customer
+      await emailService.sendContactConfirmation(populatedMessage);
+
+      // --- Lead Creation Logic ---
+      try {
+        const firstName = req.body.name.split(' ')[0] || req.body.name;
+        const lastName = req.body.name.split(' ').slice(1).join(' ') || '';
+
+        let lead = await Lead.findOne({
+          'contact.email': req.body.email.toLowerCase(),
+          agency: agencyId
+        });
+
+        if (lead) {
+          // Update existing lead
+          lead.activityLog.push({
+            action: 'lead_updated',
+            details: { description: 'Contact form submitted (CMS Message)' },
+            performedBy: null
+          });
+          lead.notes.push({
+            content: `New CMS contact form submission: ${req.body.message}`,
+            createdBy: null,
+            createdAt: new Date()
+          });
+          await lead.save();
+        } else {
+          // Create new lead
+          lead = new Lead({
+            agency: agencyId,
+            contact: {
+              firstName,
+              lastName,
+              email: req.body.email,
+              phone: req.body.phone || ''
+            },
+            source: 'website',
+            status: 'new',
+            priority: 'Warm',
+            inquiry: {
+              message: req.body.message
+            },
+            activityLog: [{
+              action: 'lead_created',
+              details: { description: 'Contact form submitted (CMS Message)' },
+              performedBy: null
+            }],
+            sla: {
+              firstContactSla: 3600000,
+              firstContactStatus: 'pending'
+            }
+          });
+          await lead.save();
+          try {
+            await leadScoringService.autoScoreLead(lead._id, true);
+          } catch (e) { console.error('Auto score error:', e); }
+        }
+      } catch (leadError) {
+        console.error('Error creating lead from CMS message:', leadError);
+      }
+      // --- End Lead Creation Logic ---
+
     } catch (notifError) {
       console.error('Error sending contact message notifications:', notifError);
     }

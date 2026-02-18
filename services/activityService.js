@@ -79,10 +79,10 @@ class ActivityService {
   }
 
   getLeadActivityTitle(type, lead) {
-    const leadName = lead.contact 
+    const leadName = lead.contact
       ? `${lead.contact.firstName} ${lead.contact.lastName}`
       : 'Lead';
-    
+
     const titles = {
       'lead_created': `New lead created: ${leadName}`,
       'lead_updated': `Lead updated: ${leadName}`,
@@ -93,20 +93,20 @@ class ActivityService {
       'task_created': `Task created for lead: ${leadName}`,
       'task_completed': `Task completed for lead: ${leadName}`
     };
-    
+
     return titles[type] || `Activity on lead: ${leadName}`;
   }
 
   getPropertyActivityTitle(type, property) {
     const propertyTitle = property.title || 'Property';
-    
+
     const titles = {
       'property_created': `Property created: ${propertyTitle}`,
       'property_updated': `Property updated: ${propertyTitle}`,
       'property_approved': `Property approved: ${propertyTitle}`,
       'property_rejected': `Property rejected: ${propertyTitle}`
     };
-    
+
     return titles[type] || `Activity on property: ${propertyTitle}`;
   }
 
@@ -115,7 +115,7 @@ class ActivityService {
       'transaction_created': `Transaction created: ${transaction.amount} ${transaction.currency}`,
       'transaction_updated': `Transaction updated: ${transaction.amount} ${transaction.currency}`
     };
-    
+
     return titles[type] || `Activity on transaction`;
   }
 }

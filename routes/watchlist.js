@@ -12,9 +12,14 @@ const router = express.Router();
 router.get('/', auth, async (req, res) => {
   try {
     const watchlist = await Watchlist.find({ user: req.user.id })
-      .populate('property', 'title slug price location specifications images status')
-      .populate('property.agency', 'name logo')
-      .populate('property.agent', 'firstName lastName')
+      .populate({
+        path: 'property',
+        select: 'title slug price location specifications images status',
+        populate: [
+          { path: 'agency', select: 'name logo' },
+          { path: 'agent', select: 'firstName lastName' }
+        ]
+      })
       .sort({ createdAt: -1 });
 
     res.json({ watchlist });
@@ -61,9 +66,14 @@ router.post('/', [
     await watchlistItem.save();
 
     const populated = await Watchlist.findById(watchlistItem._id)
-      .populate('property', 'title slug price location specifications images status')
-      .populate('property.agency', 'name logo')
-      .populate('property.agent', 'firstName lastName');
+      .populate({
+        path: 'property',
+        select: 'title slug price location specifications images status',
+        populate: [
+          { path: 'agency', select: 'name logo' },
+          { path: 'agent', select: 'firstName lastName' }
+        ]
+      });
 
     res.status(201).json({ watchlistItem: populated });
   } catch (error) {

@@ -84,6 +84,31 @@ const propertySchema = new mongoose.Schema({
       type: Number,
       min: 0
     },
+    balconies: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
+    livingRoom: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
+    unfurnished: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
+    semiFurnished: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
+    fullyFurnished: {
+      type: Number,
+      min: 0,
+      default: 0
+    },
     area: {
       value: {
         type: Number,
@@ -162,7 +187,7 @@ const propertySchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['draft', 'pending', 'active', 'sold', 'rented', 'inactive', 'unavailable'],
+    enum: ['draft', 'pending', 'active', 'booked', 'sold', 'rented', 'inactive', 'unavailable'],
     default: 'pending'
   },
   createdBy: {

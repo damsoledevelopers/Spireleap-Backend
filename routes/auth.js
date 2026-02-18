@@ -135,13 +135,14 @@ router.post('/register', [
     // Generate token
     const token = generateToken(user._id);
 
-    // Send welcome email
-    try {
-      await emailService.sendWelcomeEmail(user);
-    } catch (emailError) {
-      console.error('Failed to send welcome email:', emailError);
-      // Don't fail registration if email fails
-    }
+    // Send welcome email (Non-blocking)
+    setImmediate(async () => {
+      try {
+        await emailService.sendWelcomeEmail(user);
+      } catch (emailError) {
+        console.error('Failed to send welcome email:', emailError);
+      }
+    });
 
     const responseMessage = (role === 'agent' || role === 'agency_admin') && !agencyId
       ? 'Registration successful! Your account is pending approval from an administrator.'
@@ -279,6 +280,15 @@ router.post('/login', [
 
     // Generate token
     const token = generateToken(user._id);
+
+    // Send login notification email (Non-blocking)
+    setImmediate(async () => {
+      try {
+        await emailService.sendLoginNotificationEmail(user);
+      } catch (emailError) {
+        console.error('Failed to send login notification email:', emailError);
+      }
+    });
 
     res.json({
       message: 'Login successful',

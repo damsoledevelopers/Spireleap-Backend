@@ -26,6 +26,12 @@ const rolePermissionSchema = new mongoose.Schema({
             edit: { type: Boolean, default: true },
             delete: { type: Boolean, default: true }
         },
+    subscriptions: {
+        view: { type: Boolean, default: true },
+        create: { type: Boolean, default: true },
+        edit: { type: Boolean, default: true },
+        delete: { type: Boolean, default: true }
+    },
         contact_messages: {
             view: { type: Boolean, default: true },
             create: { type: Boolean, default: false },

@@ -85,7 +85,18 @@ const transactionSchema = new mongoose.Schema({
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User'
     }
-  }]
+  }],
+  customerConfirmed: {
+    type: Boolean,
+    default: false
+  },
+  paymentDetails: {
+    amountPaid: Number,
+    dueAmount: Number,
+    paymentDate: Date,
+    paymentMethod: String,
+    transactionReference: String
+  }
 }, {
   timestamps: true
 });

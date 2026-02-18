@@ -6,13 +6,19 @@ const User = require('../models/User');
 const Agency = require('../models/Agency');
 const { auth, authorize, optionalAuth, checkModulePermission } = require('../middleware/auth');
 const emailService = require('../services/emailService');
+const Lead = require('../models/Lead');
+const Transaction = require('../models/Transaction');
 
 const router = express.Router();
 
 router.get('/', optionalAuth, [
   query('page').optional().isInt({ min: 1 }),
-  query('limit').optional().isInt({ min: 1, max: 500 }),
-  query('status').optional().isIn(['draft', 'pending', 'active', 'sold', 'rented', 'inactive']),
+  query('limit').optional().isInt({ min: 1, max: 2000 }),
+  query('status').optional().custom(value => {
+    const statuses = value.split(',').map(s => s.trim());
+    const validStatuses = ['draft', 'pending', 'active', 'sold', 'rented', 'inactive', 'booked'];
+    return statuses.every(s => validStatuses.includes(s));
+  }),
   query('propertyType').optional(),
   query('listingType').optional().isIn(['sale', 'rent', 'both']),
   query('city').optional(),
@@ -29,7 +35,12 @@ router.get('/', optionalAuth, [
   query('minArea').optional().isFloat({ min: 0 }),
   query('maxArea').optional().isFloat({ min: 0 }),
   query('featured').optional().isBoolean(),
-  query('trending').optional().isBoolean()
+  query('trending').optional().isBoolean(),
+  query('balconies').optional().isInt({ min: 0 }),
+  query('livingRoom').optional().isInt({ min: 0 }),
+  query('unfurnished').optional().isInt({ min: 0 }),
+  query('semiFurnished').optional().isInt({ min: 0 }),
+  query('fullyFurnished').optional().isInt({ min: 0 })
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -75,9 +86,14 @@ router.get('/', optionalAuth, [
 
     // Status filtering - query parameter takes precedence
     if (req.query.status && req.query.status.trim() !== '') {
-      filter.status = req.query.status.trim();
-    } else if (!req.user) {
-      // For public (non-authenticated) users, only show active properties
+      const statuses = req.query.status.split(',').map(s => s.trim());
+      if (statuses.length > 1) {
+        filter.status = { $in: statuses };
+      } else {
+        filter.status = statuses[0];
+      }
+    } else if (!req.user || (req.user.role !== 'super_admin' && req.user.role !== 'agency_admin' && req.user.role !== 'agent' && req.user.role !== 'staff')) {
+      // For public users and customers, only show active properties by default
       filter.status = 'active';
     }
     // If user is authenticated and no status filter, show all statuses (no status filter applied)
@@ -198,6 +214,21 @@ router.get('/', optionalAuth, [
     if (req.query.bathrooms) {
       filter['specifications.bathrooms'] = parseInt(req.query.bathrooms);
     }
+    if (req.query.balconies) {
+      filter['specifications.balconies'] = parseInt(req.query.balconies);
+    }
+    if (req.query.livingRoom) {
+      filter['specifications.livingRoom'] = parseInt(req.query.livingRoom);
+    }
+    if (req.query.unfurnished) {
+      filter['specifications.unfurnished'] = parseInt(req.query.unfurnished);
+    }
+    if (req.query.semiFurnished) {
+      filter['specifications.semiFurnished'] = parseInt(req.query.semiFurnished);
+    }
+    if (req.query.fullyFurnished) {
+      filter['specifications.fullyFurnished'] = parseInt(req.query.fullyFurnished);
+    }
     if (req.query.minArea || req.query.maxArea) {
       const areaFilter = {};
       if (req.query.minArea) {
@@ -264,6 +295,11 @@ router.get('/', optionalAuth, [
           { 'price.rent.amount': numericValue },
           { 'specifications.bedrooms': numericValue },
           { 'specifications.bathrooms': numericValue },
+          { 'specifications.balconies': numericValue },
+          { 'specifications.livingRoom': numericValue },
+          { 'specifications.unfurnished': numericValue },
+          { 'specifications.semiFurnished': numericValue },
+          { 'specifications.fullyFurnished': numericValue },
           { 'specifications.area.value': numericValue }
         );
       }
@@ -435,13 +471,66 @@ router.put('/:id/assign', [
       .populate('agent', 'firstName lastName email phone profileImage')
       .populate('category', 'name')
       .populate('amenities', 'name icon');
-
     res.json({
       message: 'Property reassigned successfully',
       property: updatedProperty
     });
   } catch (error) {
     console.error('Reassign property error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   GET /api/properties/my-properties
+// @desc    Get properties for current customer (inquired, purchased, rented)
+// @access  Private
+router.get('/my-properties', auth, async (req, res) => {
+  try {
+    const userEmail = req.user.email;
+    const Lead = require('../models/Lead');
+    // Ensure Transaction model is registered
+    let Transaction;
+    try {
+      Transaction = mongoose.model('Transaction');
+    } catch (e) {
+      Transaction = require('../models/Transaction');
+    }
+
+    // 1. Inquired properties
+    const inquiries = await Lead.find({ 'contact.email': userEmail })
+      .populate({
+        path: 'property',
+        populate: [
+          { path: 'agency', select: 'name logo' },
+          { path: 'agent', select: 'firstName lastName email' }
+        ]
+      })
+      .sort({ createdAt: -1 });
+
+    // 2. Purchased/Rented properties via transactions
+    const customerLeadsIds = await Lead.find({ 'contact.email': userEmail }).distinct('_id');
+    const transactions = await Transaction.find({
+      lead: { $in: customerLeadsIds }
+    }).populate({
+      path: 'property',
+      populate: [
+        { path: 'agency', select: 'name logo' },
+        { path: 'agent', select: 'firstName lastName email' }
+      ]
+    });
+
+    const purchased = transactions.filter(t => t.type === 'sale' && t.status === 'completed').map(t => t.property);
+    const rented = transactions.filter(t => t.type === 'rent' && t.status === 'completed').map(t => t.property);
+    const booked = transactions.filter(t => t.status === 'pending').map(t => t.property);
+
+    res.json({
+      inquired: inquiries.map(i => i.property).filter(Boolean),
+      purchased: purchased.filter(Boolean),
+      rented: rented.filter(Boolean),
+      booked: booked.filter(Boolean)
+    });
+  } catch (error) {
+    console.error('Get my properties error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -515,6 +604,43 @@ router.get('/:id', optionalAuth, async (req, res) => {
     property.viewCount += 1;
     await property.save();
 
+    // Check if current user has booked this property or has it in watchlist
+    if (req.user) {
+      // Check booking status
+      const Lead = require('../models/Lead');
+      const Transaction = require('../models/Transaction');
+
+      const lead = await Lead.findOne({
+        property: property._id,
+        'contact.email': req.user.email
+      });
+
+      if (lead) {
+        const transaction = await Transaction.findOne({
+          lead: lead._id,
+          property: property._id,
+          status: { $in: ['pending', 'completed'] }
+        });
+        if (transaction) {
+          property = property.toObject();
+          property.hasBooked = true;
+          property.bookingStatus = transaction.status;
+        }
+      }
+
+      // Check watchlist status
+      const Watchlist = require('../models/Watchlist');
+      const watchlistItem = await Watchlist.findOne({
+        user: req.user.id,
+        property: property._id
+      });
+
+      if (watchlistItem) {
+        if (!property.hasBooked) property = property.toObject(); // Convert only if not already converted
+        property.inWishlist = true;
+      }
+    }
+
     res.json({ property });
   } catch (error) {
     console.error('Get property error:', error);
@@ -581,6 +707,43 @@ router.get('/slug/:slug', optionalAuth, async (req, res) => {
     property.viewCount += 1;
     await property.save();
 
+    // Check if current user has booked this property or has it in watchlist
+    if (req.user) {
+      // Check booking status
+      const Lead = require('../models/Lead');
+      const Transaction = require('../models/Transaction');
+
+      const lead = await Lead.findOne({
+        property: property._id,
+        'contact.email': req.user.email
+      });
+
+      if (lead) {
+        const transaction = await Transaction.findOne({
+          lead: lead._id,
+          property: property._id,
+          status: { $in: ['pending', 'completed'] }
+        });
+        if (transaction) {
+          property = property.toObject();
+          property.hasBooked = true;
+          property.bookingStatus = transaction.status;
+        }
+      }
+
+      // Check watchlist status
+      const Watchlist = require('../models/Watchlist');
+      const watchlistItem = await Watchlist.findOne({
+        user: req.user.id,
+        property: property._id
+      });
+
+      if (watchlistItem) {
+        if (!property.hasBooked) property = property.toObject(); // Convert only if not already converted
+        property.inWishlist = true;
+      }
+    }
+
     res.json({ property });
   } catch (error) {
     console.error('Get property by slug error:', error);
@@ -589,6 +752,162 @@ router.get('/slug/:slug', optionalAuth, async (req, res) => {
       message: 'Server error',
       error: process.env.NODE_ENV === 'development' ? error.message : undefined
     });
+  }
+});
+
+// @route   POST /api/properties/:id/book
+// @desc    Book a property from customer panel
+// @access  Private (Customer)
+router.post('/:id/book', auth, async (req, res) => {
+  try {
+    const property = await Property.findById(req.params.id)
+      .populate('agency')
+      .populate('agent');
+    if (!property) {
+      return res.status(404).json({ message: 'Property not found' });
+    }
+
+    if (property.status !== 'active') {
+      return res.status(400).json({ message: 'Property is not available for booking' });
+    }
+
+    // Fetch full user details for correct name/phone in emails and leads
+    const customerUser = await User.findById(req.user.id);
+    if (!customerUser) {
+      return res.status(404).json({ message: 'Customer account not found' });
+    }
+
+    // 1. Find or create a Lead for this customer
+    // Consolidate leads by email to prevent duplicates in the lead panel
+    let lead = await Lead.findOne({
+      'contact.email': customerUser.email
+    });
+
+    if (lead) {
+      // If lead exists, add this property to interestedProperties if not already there
+      const alreadyInterested = lead.interestedProperties?.some(ip =>
+        ip.property?.toString() === property._id?.toString()
+      );
+
+      if (!alreadyInterested) {
+        lead.interestedProperties = lead.interestedProperties || [];
+        lead.interestedProperties.push({
+          property: property._id,
+          action: 'booked',
+          date: new Date()
+        });
+      }
+
+      // Update main property to the latest one if needed, or keep original
+      // The user wants one lead for multiple properties, so we maintain internal list
+      await lead.save();
+    } else {
+      // Ensure phone is present as it's required by Lead schema
+      const userPhone = customerUser.phone || '0000000000';
+      lead = new Lead({
+        property: property._id,
+        interestedProperties: [{
+          property: property._id,
+          action: 'booked',
+          date: new Date()
+        }],
+        agency: property.agency,
+        assignedAgent: property.agent,
+        contact: {
+          firstName: customerUser.firstName || 'Customer',
+          lastName: customerUser.lastName || 'User',
+          email: customerUser.email,
+          phone: userPhone
+        },
+        inquiry: {
+          message: 'Property booked from customer portal'
+        },
+        status: 'new',
+        source: 'website'
+      });
+
+      if (!lead.agency) {
+        return res.status(400).json({ message: 'Property has no associated agency' });
+      }
+
+      await lead.save();
+    }
+
+    // 2. Determine Transaction Amount
+    let transactionAmount = 0;
+    if (property.listingType === 'rent') {
+      transactionAmount = property.price?.rent?.amount || 0;
+    } else {
+      transactionAmount = property.price?.sale || 0;
+    }
+
+    if (!transactionAmount || transactionAmount <= 0) {
+      return res.status(400).json({ message: 'Property price is not set correctly' });
+    }
+
+    // 3. Create a Transaction
+    const transaction = new Transaction({
+      property: property._id,
+      lead: lead._id,
+      agency: property.agency || lead.agency,
+      agent: property.agent || lead.assignedAgent,
+      type: property.listingType === 'rent' ? 'rent' : 'sale',
+      amount: transactionAmount,
+      status: 'pending',
+      transactionDate: new Date(),
+      paymentMethod: 'other',
+      notes: 'Booked by customer',
+      createdBy: req.user.id
+    });
+
+    // Ensure agency and agent are present as they are required by Transaction schema
+    if (!transaction.agency || !transaction.agent) {
+      return res.status(400).json({ message: 'Agency or Agent information missing on property' });
+    }
+
+    // Calculate commission (Default 2% if not specified)
+    const commPerc = lead.inquiry?.commissionPercentage || 2;
+    transaction.commission = {
+      percentage: commPerc,
+      amount: (transactionAmount * commPerc) / 100
+    };
+
+    await transaction.save();
+
+    // 4. Update Property Status
+    // Removed: Property status should remain 'active' until confirmed/completed
+    // property.status = 'booked';
+    // await property.save();
+
+    // 5. Send Email Notifications (Customer, Agent, Agency)
+    setImmediate(async () => {
+      try {
+        await emailService.sendBookingRequestNotification(
+          property,
+          customerUser,
+          property.agent,
+          property.agency
+        );
+      } catch (notifError) {
+        console.error('Error sending booking notifications:', notifError);
+      }
+    });
+
+    res.json({
+      message: 'Property booked successfully',
+      property,
+      transaction
+    });
+  } catch (error) {
+    console.error('Book property error:', error);
+    // Return specific validation error if it exists
+    if (error.name === 'ValidationError') {
+      return res.status(400).json({
+        message: 'Validation failed',
+        errors: Object.values(error.errors).map(err => err.message)
+      });
+    }
+    res.status(500).json({ message: 'Server error', error: error.message });
   }
 });
 
@@ -720,10 +1039,11 @@ router.post('/', [
       .populate('category', 'name')
       .populate('amenities', 'name icon');
 
-    // Send notification to Agency Admins if an agent created the property
-    if (req.user.role === 'agent') {
-      setImmediate(async () => {
-        try {
+    // Send notifications
+    setImmediate(async () => {
+      try {
+        // 1. Notify Agency Admins (if creator is not an agency admin)
+        if (req.user.role !== 'agency_admin') {
           // Find all active agency admins for this agency
           const agencyAdmins = await User.find({
             agency: populatedProperty.agency?._id || populatedProperty.agency,
@@ -741,11 +1061,23 @@ router.post('/', [
               recipientEmails
             );
           }
-        } catch (notifError) {
-          console.error('Error sending new property listing notification:', notifError);
         }
-      });
-    }
+
+        // 2. Notify Assigned Agent (if creator is not the agent)
+        if (req.user.role !== 'agent' && populatedProperty.agent) {
+          // Check if agent is valid and has email
+          if (populatedProperty.agent.email) {
+            await emailService.sendNewPropertyNotificationToAgent(
+              populatedProperty,
+              populatedProperty.agent,
+              populatedProperty.agency
+            );
+          }
+        }
+      } catch (notifError) {
+        console.error('Error sending new property notifications:', notifError);
+      }
+    });
 
     res.status(201).json(populatedProperty);
   } catch (error) {

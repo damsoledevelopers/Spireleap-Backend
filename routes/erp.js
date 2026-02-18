@@ -184,8 +184,8 @@ router.get('/sync-status/:leadId', auth, checkModulePermission('leads', 'view'),
       leadId: lead.leadId,
       erpSync: lead.erpSync || [],
       isSynced: lead.erpSync && lead.erpSync.length > 0,
-      lastSync: lead.erpSync && lead.erpSync.length > 0 
-        ? lead.erpSync[lead.erpSync.length - 1].syncedAt 
+      lastSync: lead.erpSync && lead.erpSync.length > 0
+        ? lead.erpSync[lead.erpSync.length - 1].syncedAt
         : null
     });
   } catch (error) {
@@ -208,10 +208,10 @@ router.post('/webhook', async (req, res) => {
     }
 
     const webhookData = req.body;
-    
+
     // Process ERP webhook data
     // This would typically update leads, transactions, or other entities based on ERP events
-    
+
     res.json({
       success: true,
       message: 'ERP webhook received',

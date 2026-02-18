@@ -158,7 +158,7 @@ class NotificationService {
         await this.sendToUser(property.agent, {
           type: status === 'approved' ? 'property_approved' : 'property_rejected',
           title: status === 'approved' ? 'Property Approved' : 'Property Rejected',
-          message: status === 'approved' 
+          message: status === 'approved'
             ? `Your property "${property.title}" has been approved`
             : `Your property "${property.title}" has been rejected. Reason: ${reason || 'Not specified'}`,
           data: {
@@ -261,6 +261,48 @@ class NotificationService {
       });
     } catch (error) {
       console.error('Error notifying payment received:', error);
+    }
+  }
+
+  /**
+   * Notify about property confirmation by customer
+   */
+  async notifyPropertyConfirmation(transaction) {
+    try {
+      const customerName = transaction.lead?.contact
+        ? `${transaction.lead.contact.firstName} ${transaction.lead.contact.lastName}`
+        : 'A customer';
+
+      const propertyTitle = transaction.property?.title || 'a property';
+
+      const notification = {
+        type: 'property_confirmed',
+        title: 'Property Booking Confirmed',
+        message: `${customerName} has confirmed the booking for "${propertyTitle}".`,
+        data: {
+          transactionId: transaction._id,
+          propertyId: transaction.property?._id,
+          leadId: transaction.lead?._id,
+          amount: transaction.amount
+        },
+        logActivity: true
+      };
+
+      // 1. Notify Assigned Agent
+      if (transaction.agent) {
+        await this.sendToUser(transaction.agent, notification);
+      }
+
+      // 2. Notify Agency Admins
+      if (transaction.agency) {
+        await this.sendToAgency(transaction.agency, notification);
+      }
+
+      // 3. Notify Super Admins
+      await this.sendToRole('super_admin', notification);
+
+    } catch (error) {
+      console.error('Error notifying property confirmation:', error);
     }
   }
 }

@@ -111,15 +111,14 @@ class LeadScoringService {
    */
   getPriorityFromScore(score) {
     if (score >= 70) return 'Hot';
-    if (score >= 40) return 'Warm';
-    if (score >= 20) return 'Cold';
-    return 'Not_interested';
+    if (score >= 10) return 'Warm';
+    return 'Warm';
   }
 
   /**
    * Auto-score a lead and update priority
    */
-  async autoScoreLead(leadId) {
+  async autoScoreLead(leadId, shouldUpdatePriority = true) {
     try {
       const lead = await Lead.findById(leadId);
       if (!lead) {
@@ -132,8 +131,9 @@ class LeadScoringService {
       lead.score = score;
       lead.scoreDetails = details;
 
-      // Auto-update priority if enabled (only if not manually set to 'Not_interested')
-      if (lead.priority !== 'Not_interested' || priority === 'Hot') {
+      // Auto-update priority if enabled and allowed
+      if (shouldUpdatePriority) {
+        // Always update priority based on score for new inquiries/updates
         lead.priority = priority;
       }
 

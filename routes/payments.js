@@ -10,7 +10,7 @@ const Lead = require('../models/Lead');
 // @route   POST /api/payments/create-order
 // @desc    Create payment order (Razorpay/Stripe)
 // @access  Private
-router.post('/create-order', 
+router.post('/create-order',
   auth,
   checkModulePermission('leads', 'edit'),
   [
@@ -20,61 +20,61 @@ router.post('/create-order',
     body('transactionId').isMongoId().withMessage('Valid transaction ID is required')
   ],
   async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+
+      const { amount, currency, gateway, transactionId, metadata } = req.body;
+
+      // Verify transaction exists
+      const transaction = await Transaction.findById(transactionId);
+      if (!transaction) {
+        return res.status(404).json({ message: 'Transaction not found' });
+      }
+
+      let orderData = null;
+
+      if (gateway === 'razorpay') {
+        orderData = await paymentService.createRazorpayOrder(
+          amount,
+          currency || 'INR',
+          { transactionId, ...metadata }
+        );
+      } else if (gateway === 'stripe') {
+        orderData = await paymentService.createStripePaymentIntent(
+          amount,
+          currency || 'usd',
+          { transactionId, ...metadata }
+        );
+      }
+
+      // Create payment record
+      const payment = await paymentService.createPayment({
+        transaction: transactionId,
+        lead: transaction.lead,
+        property: transaction.property,
+        agency: transaction.agency,
+        amount: amount,
+        currency: currency || (gateway === 'razorpay' ? 'INR' : 'USD'),
+        paymentMethod: gateway,
+        gateway: gateway,
+        gatewayOrderId: orderData.id,
+        status: 'pending',
+        createdBy: req.user.id
+      });
+
+      res.json({
+        paymentId: payment._id,
+        order: orderData,
+        gateway: gateway
+      });
+    } catch (error) {
+      console.error('Payment order creation error:', error);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
-
-    const { amount, currency, gateway, transactionId, metadata } = req.body;
-
-    // Verify transaction exists
-    const transaction = await Transaction.findById(transactionId);
-    if (!transaction) {
-      return res.status(404).json({ message: 'Transaction not found' });
-    }
-
-    let orderData = null;
-
-    if (gateway === 'razorpay') {
-      orderData = await paymentService.createRazorpayOrder(
-        amount,
-        currency || 'INR',
-        { transactionId, ...metadata }
-      );
-    } else if (gateway === 'stripe') {
-      orderData = await paymentService.createStripePaymentIntent(
-        amount,
-        currency || 'usd',
-        { transactionId, ...metadata }
-      );
-    }
-
-    // Create payment record
-    const payment = await paymentService.createPayment({
-      transaction: transactionId,
-      lead: transaction.lead,
-      property: transaction.property,
-      agency: transaction.agency,
-      amount: amount,
-      currency: currency || (gateway === 'razorpay' ? 'INR' : 'USD'),
-      paymentMethod: gateway,
-      gateway: gateway,
-      gatewayOrderId: orderData.id,
-      status: 'pending',
-      createdBy: req.user.id
-    });
-
-    res.json({
-      paymentId: payment._id,
-      order: orderData,
-      gateway: gateway
-    });
-  } catch (error) {
-    console.error('Payment order creation error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
+  });
 
 // @route   POST /api/payments/verify
 // @desc    Verify payment (Razorpay/Stripe)
@@ -87,59 +87,59 @@ router.post('/verify',
     body('gateway').isIn(['razorpay', 'stripe']).withMessage('Valid gateway is required')
   ],
   async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+
+      const { paymentId, gateway, razorpayData, stripeData } = req.body;
+
+      const payment = await Payment.findById(paymentId);
+      if (!payment) {
+        return res.status(404).json({ message: 'Payment not found' });
+      }
+
+      let verified = false;
+      let gatewayPaymentId = null;
+
+      if (gateway === 'razorpay' && razorpayData) {
+        const { orderId, paymentId: razorpayPaymentId, signature } = razorpayData;
+        verified = paymentService.verifyRazorpaySignature(orderId, razorpayPaymentId, signature);
+        gatewayPaymentId = razorpayPaymentId;
+      } else if (gateway === 'stripe' && stripeData) {
+        const { paymentIntentId } = stripeData;
+        const paymentIntent = await paymentService.verifyStripePayment(paymentIntentId);
+        verified = paymentIntent.status === 'succeeded';
+        gatewayPaymentId = paymentIntentId;
+      }
+
+      if (verified) {
+        await paymentService.updatePaymentStatus(paymentId, 'completed', {
+          paymentId: gatewayPaymentId,
+          orderId: payment.gatewayOrderId,
+          signature: razorpayData?.signature
+        });
+
+        const updatedPayment = await Payment.findById(paymentId)
+          .populate('transaction')
+          .populate('lead')
+          .populate('property');
+
+        res.json({
+          success: true,
+          payment: updatedPayment,
+          message: 'Payment verified successfully'
+        });
+      } else {
+        await paymentService.updatePaymentStatus(paymentId, 'failed');
+        res.status(400).json({ message: 'Payment verification failed' });
+      }
+    } catch (error) {
+      console.error('Payment verification error:', error);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
-
-    const { paymentId, gateway, razorpayData, stripeData } = req.body;
-
-    const payment = await Payment.findById(paymentId);
-    if (!payment) {
-      return res.status(404).json({ message: 'Payment not found' });
-    }
-
-    let verified = false;
-    let gatewayPaymentId = null;
-
-    if (gateway === 'razorpay' && razorpayData) {
-      const { orderId, paymentId: razorpayPaymentId, signature } = razorpayData;
-      verified = paymentService.verifyRazorpaySignature(orderId, razorpayPaymentId, signature);
-      gatewayPaymentId = razorpayPaymentId;
-    } else if (gateway === 'stripe' && stripeData) {
-      const { paymentIntentId } = stripeData;
-      const paymentIntent = await paymentService.verifyStripePayment(paymentIntentId);
-      verified = paymentIntent.status === 'succeeded';
-      gatewayPaymentId = paymentIntentId;
-    }
-
-    if (verified) {
-      await paymentService.updatePaymentStatus(paymentId, 'completed', {
-        paymentId: gatewayPaymentId,
-        orderId: payment.gatewayOrderId,
-        signature: razorpayData?.signature
-      });
-
-      const updatedPayment = await Payment.findById(paymentId)
-        .populate('transaction')
-        .populate('lead')
-        .populate('property');
-
-      res.json({
-        success: true,
-        payment: updatedPayment,
-        message: 'Payment verified successfully'
-      });
-    } else {
-      await paymentService.updatePaymentStatus(paymentId, 'failed');
-      res.status(400).json({ message: 'Payment verification failed' });
-    }
-  } catch (error) {
-    console.error('Payment verification error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
+  });
 
 // @route   POST /api/payments/webhook/razorpay
 // @desc    Razorpay webhook handler
@@ -227,25 +227,25 @@ router.post('/:id/refund',
     body('reason').optional().isString()
   ],
   async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+
+      const { amount, reason } = req.body;
+      const payment = await paymentService.processRefund(req.params.id, amount, reason);
+
+      res.json({
+        success: true,
+        payment: payment,
+        message: 'Refund processed successfully'
+      });
+    } catch (error) {
+      console.error('Refund error:', error);
+      res.status(500).json({ message: 'Server error', error: error.message });
     }
-
-    const { amount, reason } = req.body;
-    const payment = await paymentService.processRefund(req.params.id, amount, reason);
-
-    res.json({
-      success: true,
-      payment: payment,
-      message: 'Refund processed successfully'
-    });
-  } catch (error) {
-    console.error('Refund error:', error);
-    res.status(500).json({ message: 'Server error', error: error.message });
-  }
-});
+  });
 
 // @route   GET /api/payments
 // @desc    Get all payments
@@ -319,10 +319,30 @@ router.get('/:id', auth, checkModulePermission('leads', 'view'), async (req, res
 // @route   GET /api/payments/:id/receipt
 // @desc    Get payment receipt
 // @access  Private
-router.get('/:id/receipt', auth, checkModulePermission('leads', 'view'), async (req, res) => {
+router.get('/:id/receipt', auth, async (req, res) => {
   try {
-    const receipt = await paymentService.generateReceipt(req.params.id);
-    res.json(receipt);
+    const payment = await Payment.findById(req.params.id).populate('lead');
+
+    if (!payment) {
+      return res.status(404).json({ message: 'Payment not found' });
+    }
+
+    // Permission check: Admin/Agent or the Customer who owns the payment
+    const isOwner = payment.lead?.contact?.email === req.user.email;
+    const isAgencyAdmin = req.user.role === 'agency_admin' && payment.agency.toString() === req.user.agency;
+    const isSuperAdmin = req.user.role === 'super_admin';
+    const isAgent = req.user.role === 'agent' && payment.createdBy.toString() === req.user.id;
+
+    if (!isOwner && !isAgencyAdmin && !isSuperAdmin && !isAgent) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    const doc = await paymentService.generateReceiptPDF(req.params.id);
+
+    res.setHeader('Content-Type', 'application/pdf');
+    res.setHeader('Content-Disposition', `attachment; filename=receipt-${payment.receipt?.number || req.params.id}.pdf`);
+
+    doc.pipe(res);
   } catch (error) {
     console.error('Get receipt error:', error);
     res.status(500).json({ message: 'Server error', error: error.message });

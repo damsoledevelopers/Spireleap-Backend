@@ -19,6 +19,21 @@ const leadSchema = new mongoose.Schema({
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Property'
   },
+  interestedProperties: [{
+    property: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'Property'
+    },
+    action: {
+      type: String,
+      enum: ['inquiry', 'viewing', 'booked', 'sold', 'rented'],
+      default: 'inquiry'
+    },
+    date: {
+      type: Date,
+      default: Date.now
+    }
+  }],
   contact: {
     firstName: {
       type: String,
@@ -260,6 +275,7 @@ const leadSchema = new mongoose.Schema({
     scheduledDate: Date,
     scheduledTime: String,
     completedDate: Date,
+    cancelledDate: Date,
     status: {
       type: String,
       enum: ['scheduled', 'completed', 'no_show', 'cancelled'],
@@ -274,8 +290,26 @@ const leadSchema = new mongoose.Schema({
     relationshipManager: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User'
-    }
+    },
+    property: { type: mongoose.Schema.Types.ObjectId, ref: 'Property' }
   },
+  // Multiple site visits per lead (use this for listing and deleting a particular visit)
+  siteVisits: [{
+    scheduledDate: Date,
+    scheduledTime: String,
+    completedDate: Date,
+    cancelledDate: Date,
+    status: {
+      type: String,
+      enum: ['scheduled', 'completed', 'no_show', 'cancelled'],
+      default: 'scheduled'
+    },
+    feedback: String,
+    interestLevel: { type: String, enum: ['high', 'medium', 'low', 'not_interested'] },
+    nextAction: String,
+    relationshipManager: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
+    property: { type: mongoose.Schema.Types.ObjectId, ref: 'Property' }
+  }],
   booking: {
     unitNumber: String,
     flatNumber: String,
@@ -392,6 +426,8 @@ const leadSchema = new mongoose.Schema({
         'document_uploaded',
         'site_visit_scheduled',
         'site_visit_completed',
+        'site_visit_cancelled',
+        'site_visit_updated',
         'lead_created',
         'lead_updated',
         'merged',
