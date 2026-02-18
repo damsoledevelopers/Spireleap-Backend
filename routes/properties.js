@@ -313,7 +313,7 @@ router.get('/', optionalAuth, [
       }
     }
 
-    const properties = await Property.find(filter)
+    let properties = await Property.find(filter)
       .populate('agency', 'name logo')
       .populate('agent', 'firstName lastName email phone')
       .populate('category', 'name')
@@ -323,6 +323,27 @@ router.get('/', optionalAuth, [
       .limit(limit);
 
     const total = await Property.countDocuments(filter);
+
+    // When user is logged in, attach hasBooked for each property (customer can book only once per property)
+    if (req.user && properties.length > 0) {
+      const userLeads = await Lead.find({ 'contact.email': req.user.email }).select('_id');
+      const leadIds = userLeads.map((l) => l._id);
+      const bookedPropertyIds = new Set();
+      if (leadIds.length > 0) {
+        const txns = await Transaction.find({
+          lead: { $in: leadIds },
+          status: { $in: ['pending', 'completed'] }
+        }).select('property');
+        txns.forEach((t) => {
+          if (t.property) bookedPropertyIds.add(t.property.toString());
+        });
+      }
+      properties = properties.map((p) => {
+        const po = p.toObject ? p.toObject() : { ...p };
+        if (bookedPropertyIds.has((po._id || p._id).toString())) po.hasBooked = true;
+        return po;
+      });
+    }
 
     res.json({
       properties,
@@ -606,23 +627,17 @@ router.get('/:id', optionalAuth, async (req, res) => {
 
     // Check if current user has booked this property or has it in watchlist
     if (req.user) {
-      // Check booking status
-      const Lead = require('../models/Lead');
-      const Transaction = require('../models/Transaction');
-
-      const lead = await Lead.findOne({
-        property: property._id,
-        'contact.email': req.user.email
-      });
-
-      if (lead) {
+      // Check booking status (user may have multiple leads or interestedProperties)
+      const userLeads = await Lead.find({ 'contact.email': req.user.email }).select('_id');
+      const leadIds = userLeads.map((l) => l._id);
+      if (leadIds.length > 0) {
         const transaction = await Transaction.findOne({
-          lead: lead._id,
           property: property._id,
+          lead: { $in: leadIds },
           status: { $in: ['pending', 'completed'] }
         });
         if (transaction) {
-          property = property.toObject();
+          property = property.toObject ? property.toObject() : { ...property };
           property.hasBooked = true;
           property.bookingStatus = transaction.status;
         }
@@ -636,7 +651,7 @@ router.get('/:id', optionalAuth, async (req, res) => {
       });
 
       if (watchlistItem) {
-        if (!property.hasBooked) property = property.toObject(); // Convert only if not already converted
+        if (!property.hasBooked && !property.inWishlist) property = property.toObject ? property.toObject() : { ...property };
         property.inWishlist = true;
       }
     }
@@ -709,23 +724,17 @@ router.get('/slug/:slug', optionalAuth, async (req, res) => {
 
     // Check if current user has booked this property or has it in watchlist
     if (req.user) {
-      // Check booking status
-      const Lead = require('../models/Lead');
-      const Transaction = require('../models/Transaction');
-
-      const lead = await Lead.findOne({
-        property: property._id,
-        'contact.email': req.user.email
-      });
-
-      if (lead) {
+      // Check booking status (user may have multiple leads or interestedProperties)
+      const userLeads = await Lead.find({ 'contact.email': req.user.email }).select('_id');
+      const leadIds = userLeads.map((l) => l._id);
+      if (leadIds.length > 0) {
         const transaction = await Transaction.findOne({
-          lead: lead._id,
           property: property._id,
+          lead: { $in: leadIds },
           status: { $in: ['pending', 'completed'] }
         });
         if (transaction) {
-          property = property.toObject();
+          property = property.toObject ? property.toObject() : { ...property };
           property.hasBooked = true;
           property.bookingStatus = transaction.status;
         }
@@ -739,7 +748,7 @@ router.get('/slug/:slug', optionalAuth, async (req, res) => {
       });
 
       if (watchlistItem) {
-        if (!property.hasBooked) property = property.toObject(); // Convert only if not already converted
+        if (!property.hasBooked && !property.inWishlist) property = property.toObject ? property.toObject() : { ...property };
         property.inWishlist = true;
       }
     }
@@ -769,6 +778,20 @@ router.post('/:id/book', auth, async (req, res) => {
 
     if (property.status !== 'active') {
       return res.status(400).json({ message: 'Property is not available for booking' });
+    }
+
+    // Prevent same customer from booking the same property more than once
+    const userLeads = await Lead.find({ 'contact.email': req.user.email }).select('_id');
+    const leadIds = userLeads.map((l) => l._id);
+    if (leadIds.length > 0) {
+      const alreadyBooked = await Transaction.findOne({
+        property: req.params.id,
+        lead: { $in: leadIds },
+        status: { $in: ['pending', 'completed'] }
+      });
+      if (alreadyBooked) {
+        return res.status(400).json({ message: 'You have already booked this property' });
+      }
     }
 
     // Fetch full user details for correct name/phone in emails and leads
