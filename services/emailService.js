@@ -89,13 +89,46 @@ class EmailService {
         auth: {
           user: safeSmtpUser,
           pass: safeSmtpPass
+        },
+        // Add connection timeout options
+        connectionTimeout: 60000, // 60 seconds for initial connection
+        greetingTimeout: 30000,   // 30 seconds for SMTP greeting
+        socketTimeout: 60000,     // 60 seconds for socket inactivity
+        // Connection pool options
+        pool: true,               // Use connection pooling
+        maxConnections: 5,        // Maximum number of connections
+        maxMessages: 100,         // Maximum messages per connection
+        // Retry options
+        retry: {
+          attempts: 3,            // Retry 3 times
+          delay: 2000             // Wait 2 seconds between retries
+        },
+        // TLS options for better compatibility
+        tls: {
+          rejectUnauthorized: false // Accept self-signed certificates if needed
         }
       });
 
-      // Verify connection
+      // Verify connection with timeout handling
       console.log('EmailService: Verifying SMTP connection...');
-      await this.transporter.verify();
-      console.log('EmailService: ✓ SMTP connection verified successfully!');
+      try {
+        await Promise.race([
+          this.transporter.verify(),
+          new Promise((_, reject) => 
+            setTimeout(() => reject(new Error('Connection verification timeout')), 60000)
+          )
+        ]);
+        console.log('EmailService: ✓ SMTP connection verified successfully!');
+      } catch (verifyError) {
+        // Log warning but don't fail initialization if verify times out
+        // Some SMTP servers may block verify() but still accept emails
+        if (verifyError.code === 'ETIMEDOUT' || verifyError.message.includes('timeout')) {
+          console.warn('EmailService: ⚠ SMTP verification timed out, but service may still work');
+          console.warn('EmailService: Will attempt to send emails without pre-verification');
+        } else {
+          throw verifyError;
+        }
+      }
 
       this.initialized = true;
     } catch (error) {
@@ -111,6 +144,17 @@ class EmailService {
         console.error('----------------------------------------------------------------');
         console.error('EmailService: 🛑 AUTHENTICATION FAILED (535)');
         console.error('Check your SMTP User and Password.');
+        console.error('----------------------------------------------------------------');
+      } else if (error.code === 'ETIMEDOUT' || error.code === 'ECONNREFUSED' || error.code === 'ECONNRESET') {
+        console.error('----------------------------------------------------------------');
+        console.error('EmailService: 🛑 CONNECTION TIMEOUT/REFUSED');
+        console.error(`Error: ${error.message}`);
+        console.error('Possible causes:');
+        console.error('1. SMTP host/port is incorrect');
+        console.error('2. Firewall blocking SMTP connections');
+        console.error('3. SMTP server is down or unreachable');
+        console.error('4. Network connectivity issues');
+        console.error(`Current config: ${safeSmtpHost}:${smtpPort}`);
         console.error('----------------------------------------------------------------');
       }
 
