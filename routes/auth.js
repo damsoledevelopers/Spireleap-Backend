@@ -7,6 +7,7 @@ const AgencyPermission = require('../models/AgencyPermission');
 const UserPermission = require('../models/UserPermission');
 const { auth } = require('../middleware/auth');
 const emailService = require('../services/emailService');
+const { normalizePhoneToE164 } = require('../utils/phone');
 
 async function getEffectivePermissions(userId, userRole, userAgency) {
   if (userRole === 'super_admin') {
@@ -39,21 +40,38 @@ async function getEffectivePermissions(userId, userRole, userAgency) {
 const router = express.Router();
 
 // Generate JWT token
-const generateToken = (userId) => {
-  return jwt.sign({ userId }, process.env.JWT_SECRET || 'fallback_secret', {
-    expiresIn: process.env.JWT_EXPIRE || '30m'
-  });
-};
+const generateToken = (userId, { persistent = false } = {}) => {
+  const expiresIn = persistent
+    ? (process.env.JWT_EXPIRE_PERSISTENT || '7d')
+    : (process.env.JWT_EXPIRE || '30m')
+
+  return jwt.sign({ userId, persistent }, process.env.JWT_SECRET || 'fallback_secret', {
+    expiresIn,
+  })
+}
 
 // @route   POST /api/auth/register
 // @desc    Register a new user
 // @access  Public
 router.post('/register', [
-  body('firstName').trim().notEmpty().withMessage('First name is required'),
-  body('lastName').trim().notEmpty().withMessage('Last name is required'),
+  body('firstName')
+    .trim()
+    .notEmpty().withMessage('First name is required')
+    .matches(/^[A-Za-z\s.'-]+$/).withMessage('First name must contain only alphabets'),
+  body('lastName')
+    .trim()
+    .notEmpty().withMessage('Last name is required')
+    .matches(/^[A-Za-z\s.'-]+$/).withMessage('Last name must contain only alphabets'),
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
   body('role').isIn(['agency_admin', 'agent', 'staff', 'user']).withMessage('Valid role is required. Super admin cannot be registered publicly.'),
+  body('phone')
+    .optional({ values: 'falsy' })
+    .custom((v) => {
+      if (!normalizePhoneToE164(v)) throw new Error('Invalid phone number')
+      return true
+    })
+    .customSanitizer((v) => normalizePhoneToE164(v)),
   body('isActive').optional().isBoolean().withMessage('isActive must be a boolean')
 ], async (req, res) => {
   try {
@@ -215,7 +233,7 @@ router.post('/login', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    const { email, password } = req.body;
+    const { email, password, rememberMe } = req.body;
 
     if (process.env.NODE_ENV === 'development') {
       console.log('Login attempt for email:', (email || '').trim().toLowerCase());
@@ -278,8 +296,8 @@ router.post('/login', [
     // Update last login (Non-blocking)
     User.updateOne({ _id: user._id }, { $set: { lastLogin: new Date() } }).catch(err => console.error('Last login update error:', err));
 
-    // Generate token
-    const token = generateToken(user._id);
+    // Generate token (persistent when rememberMe is true)
+    const token = generateToken(user._id, { persistent: !!rememberMe });
 
     // Send login notification email (Non-blocking)
     setImmediate(async () => {
@@ -340,7 +358,7 @@ router.post('/refresh-token', async (req, res) => {
       return res.status(401).json({ message: 'Account is inactive' });
     }
 
-    const newToken = generateToken(user._id);
+    const newToken = generateToken(user._id, { persistent: !!decoded.persistent });
     res.json({
       token: newToken,
       user: {
@@ -377,6 +395,7 @@ router.get('/me', auth, async (req, res) => {
     res.json({
       user: {
         id: user._id,
+        _id: user._id,
         firstName: user.firstName,
         lastName: user.lastName,
         email: user.email,
@@ -387,6 +406,7 @@ router.get('/me', auth, async (req, res) => {
         address: user.address,
         isActive: user.isActive,
         lastLogin: user.lastLogin,
+        createdAt: user.createdAt,
         profileImage: user.profileImage,
         agentInfo: user.agentInfo,
         staffInfo: user.staffInfo

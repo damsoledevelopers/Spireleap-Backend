@@ -9,6 +9,7 @@ const Property = require('../models/Property');
 const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 const emailService = require('../services/emailService');
 const Agency = require('../models/Agency');
+const { normalizePhoneToE164 } = require('../utils/phone');
 
 const router = express.Router();
 
@@ -18,12 +19,24 @@ const router = express.Router();
 router.post('/', [
   auth,
   checkModulePermission('users', 'create'),
-  body('firstName').trim().notEmpty().withMessage('First name is required'),
-  body('lastName').trim().notEmpty().withMessage('Last name is required'),
+  body('firstName')
+    .trim()
+    .notEmpty().withMessage('First name is required')
+    .matches(/^[A-Za-z\s.'-]+$/).withMessage('First name must contain only alphabets'),
+  body('lastName')
+    .trim()
+    .notEmpty().withMessage('Last name is required')
+    .matches(/^[A-Za-z\s.'-]+$/).withMessage('Last name must contain only alphabets'),
   body('email').isEmail().normalizeEmail().withMessage('Valid email is required'),
   body('password').isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
   body('role').optional().isIn(['super_admin', 'agency_admin', 'agent', 'staff', 'user']).withMessage('Invalid role'),
-  body('phone').optional().trim(),
+  body('phone')
+    .optional({ values: 'falsy' })
+    .custom((v) => {
+      if (!normalizePhoneToE164(v)) throw new Error('Invalid phone number')
+      return true
+    })
+    .customSanitizer((v) => normalizePhoneToE164(v)),
   body('address').optional(),
   body('agency').optional(),
   body('isActive').optional().isBoolean().withMessage('isActive must be a boolean')
@@ -502,10 +515,16 @@ router.put('/:id', [
     }
     return true;
   }),
-  body('firstName').optional().trim().notEmpty(),
-  body('lastName').optional().trim().notEmpty(),
+  body('firstName').optional().trim().notEmpty().matches(/^[A-Za-z\s.'-]+$/).withMessage('First name must contain only alphabets'),
+  body('lastName').optional().trim().notEmpty().matches(/^[A-Za-z\s.'-]+$/).withMessage('Last name must contain only alphabets'),
   body('email').optional().isEmail().normalizeEmail(),
-  body('phone').optional().trim(),
+  body('phone')
+    .optional({ values: 'falsy' })
+    .custom((v) => {
+      if (!normalizePhoneToE164(v)) throw new Error('Invalid phone number')
+      return true
+    })
+    .customSanitizer((v) => normalizePhoneToE164(v)),
   body('password').optional().isLength({ min: 6 }).withMessage('Password must be at least 6 characters'),
   body('address').optional(),
   body('isActive').optional().isBoolean()
@@ -551,7 +570,7 @@ router.put('/:id', [
 
     // 3. Filter and Prepare Update Data
     // We explicitly pick fields to avoid any illegal fields like _id, __v, etc.
-    const allowedFields = ['firstName', 'lastName', 'email', 'phone', 'isActive', 'role', 'agency', 'address', 'staffInfo', 'agentInfo', 'tasks', 'reminders', 'notes', 'activityLog'];
+    const allowedFields = ['firstName', 'lastName', 'email', 'phone', 'profileImage', 'isActive', 'role', 'agency', 'address', 'staffInfo', 'agentInfo', 'tasks', 'reminders', 'notes', 'activityLog'];
     const updateData = {};
 
     Object.keys(req.body).forEach(key => {

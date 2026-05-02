@@ -1,10 +1,13 @@
 const mongoose = require('mongoose');
 
+const NAME_REGEX = /^[A-Za-z\s.'-]+$/;
+
 const testimonialSchema = new mongoose.Schema({
   name: {
     type: String,
     required: [true, 'Name is required'],
-    trim: true
+    trim: true,
+    match: [NAME_REGEX, 'Name must contain only alphabets']
   },
   role: {
     type: String,

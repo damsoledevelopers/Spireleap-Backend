@@ -11,6 +11,126 @@ const Transaction = require('../models/Transaction');
 
 const router = express.Router();
 
+// @route   GET /api/properties/filter-options
+// @desc    Get dropdown options for property search filters
+// @access  Public
+router.get('/filter-options', optionalAuth, async (req, res) => {
+  try {
+    const Category = require('../models/Category');
+    const Amenity = require('../models/Amenity');
+    const Location = require('../models/Location');
+
+    const [
+      propertyTypes,
+      listingTypes,
+      cities,
+      states,
+      countries,
+      neighborhoods,
+      landmarks,
+      bedroomCounts,
+      bathroomCounts,
+      categories,
+      amenities,
+      cmsLocations
+    ] = await Promise.all([
+      Property.distinct('propertyType', {}),
+      Property.distinct('listingType', {}),
+      Property.distinct('location.city', {}),
+      Property.distinct('location.state', {}),
+      Property.distinct('location.country', {}),
+      Property.distinct('location.neighborhood', {}),
+      Property.distinct('location.landmark', {}),
+      Property.distinct('specifications.bedrooms', {}),
+      Property.distinct('specifications.bathrooms', {}),
+      Category.find({ isActive: true }).select('_id name').sort({ order: 1, name: 1 }),
+      Amenity.find({ isActive: true }).select('_id name icon category').sort({ order: 1, name: 1 }),
+      Location.find({ isDeleted: false, isActive: true }).select('country state city').lean()
+    ]);
+
+    const uniqSortedStrings = (arr) => [...new Set((arr || []).filter(Boolean).map(String).map(s => s.trim()).filter(Boolean))].sort();
+    const uniqSortedNumbers = (arr) =>
+      [...new Set((arr || []).filter(v => v !== null && v !== undefined).map(v => Number(v)).filter(v => !Number.isNaN(v)))]
+        .sort((a, b) => a - b);
+
+    const areas = uniqSortedStrings([...(neighborhoods || []), ...(landmarks || [])]);
+
+    const cmsCities = (cmsLocations || []).map((l) => l.city).filter(Boolean);
+    const cmsStates = (cmsLocations || []).map((l) => l.state).filter(Boolean);
+    const cmsCountries = (cmsLocations || []).map((l) => l.country).filter(Boolean);
+
+    // Lead-related dropdowns used while searching properties
+    const leadFieldOptions = {
+      preferredRooms: [
+        { value: 'studio', label: 'Studio' },
+        { value: '1', label: '1 Room' },
+        { value: '2', label: '2 Rooms' },
+        { value: '3', label: '3 Rooms' },
+        { value: '4', label: '4 Rooms' },
+        { value: '5_plus', label: '5+ Rooms' }
+      ],
+      preferredSize: [
+        { value: '0_500', label: '0 - 500 sqft' },
+        { value: '500_1000', label: '500 - 1000 sqft' },
+        { value: '1000_1500', label: '1000 - 1500 sqft' },
+        { value: '1500_2000', label: '1500 - 2000 sqft' },
+        { value: '2000_plus', label: '2000+ sqft' }
+      ],
+      buyerType: [
+        { value: 'end_user', label: 'End User' },
+        { value: 'investor', label: 'Investor' },
+        { value: 'agent', label: 'Agent / Broker' },
+        { value: 'company', label: 'Company' },
+        { value: 'other', label: 'Other' }
+      ],
+      paymentMethod: [
+        { value: 'cash', label: 'Cash' },
+        { value: 'mortgage', label: 'Mortgage' },
+        { value: 'bank_transfer', label: 'Bank Transfer' },
+        { value: 'cheque', label: 'Cheque' },
+        { value: 'crypto', label: 'Crypto' },
+        { value: 'other', label: 'Other' }
+      ],
+      spokenLanguages: [
+        { value: 'english', label: 'English' },
+        { value: 'arabic', label: 'Arabic' },
+        { value: 'french', label: 'French' },
+        { value: 'spanish', label: 'Spanish' },
+        { value: 'hindi', label: 'Hindi' },
+        { value: 'urdu', label: 'Urdu' },
+        { value: 'other', label: 'Other' }
+      ]
+    };
+
+    const defaultPropertyTypes = ['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'other'];
+    const defaultListingTypes = ['sale', 'rent', 'both'];
+
+    const safePropertyTypes = uniqSortedStrings(propertyTypes);
+    const safeListingTypes = uniqSortedStrings(listingTypes);
+
+    res.json({
+      propertyTypes: safePropertyTypes.length ? safePropertyTypes : defaultPropertyTypes,
+      listingTypes: safeListingTypes.length ? safeListingTypes : defaultListingTypes,
+      locations: {
+        cities: uniqSortedStrings([...(cities || []), ...cmsCities]),
+        states: uniqSortedStrings([...(states || []), ...cmsStates]),
+        countries: uniqSortedStrings([...(countries || []), ...cmsCountries]),
+        areas
+      },
+      specifications: {
+        bedrooms: uniqSortedNumbers(bedroomCounts),
+        bathrooms: uniqSortedNumbers(bathroomCounts)
+      },
+      categories,
+      amenities,
+      leadFieldOptions
+    });
+  } catch (error) {
+    console.error('Get property filter options error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 router.get('/', optionalAuth, [
   query('page').optional().isInt({ min: 1 }),
   query('limit').optional().isInt({ min: 1, max: 2000 }),
@@ -937,41 +1057,38 @@ router.post('/:id/book', auth, async (req, res) => {
 router.post('/', [
   auth,
   checkModulePermission('properties', 'create'),
-  body('title').trim().notEmpty().withMessage('Title is required'),
-  body('description').trim().notEmpty().withMessage('Description is required'),
+  body('title').optional({ values: 'falsy' }).trim(),
+  body('description').optional({ values: 'falsy' }).trim(),
   body('propertyType').isIn(['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'other']).withMessage('Invalid property type'),
   body('listingType').isIn(['sale', 'rent', 'both']).withMessage('Invalid listing type'),
-  body('location.address').trim().notEmpty().withMessage('Address is required'),
-  body('location.city').trim().notEmpty().withMessage('City is required'),
-  body('location.state').trim().notEmpty().withMessage('State is required'),
-  body('location.country').trim().notEmpty().withMessage('Country is required'),
-  body('specifications.area.value').isNumeric().withMessage('Area value is required'),
-  // agency and agent are optional - will be auto-populated from authenticated user
-  body('agency').optional().isMongoId().withMessage('Valid agency ID is required'),
-  body('agent').optional().isMongoId().withMessage('Valid agent ID is required')
+  body('location.address').optional({ values: 'falsy' }).trim(),
+  body('location.city').optional({ values: 'falsy' }).trim(),
+  body('location.state').optional({ values: 'falsy' }).trim(),
+  body('location.country').optional({ values: 'falsy' }).trim(),
+  body('specifications.area.value').optional({ values: 'falsy' }).isNumeric().withMessage('Area value must be a number'),
+  body('agency').optional({ values: 'falsy' }).isMongoId().withMessage('Valid agency ID is required'),
+  body('agent').optional({ values: 'falsy' }).isMongoId().withMessage('Valid agent ID is required')
 ], async (req, res) => {
   try {
     // Auto-populate agency and agent from authenticated user if not provided
     if (!req.body.agency) {
       if (req.user.role === 'agent' || req.user.role === 'agency_admin') {
         req.body.agency = req.user.agency;
-      } else if (req.user.role === 'super_admin' && !req.body.agency) {
-        return res.status(400).json({ message: 'Agency ID is required for super admin' });
       }
     }
 
     if (!req.body.agent) {
       if (req.user.role === 'agent') {
         req.body.agent = req.user.id;
-      } else if (req.user.role === 'agency_admin' && !req.body.agent) {
-        // Agency admin can create properties without specifying agent (optional)
-        // But if they do specify, validate it
       }
     }
 
-    // Now validate that agency and agent are present and valid
-    if (!req.body.agency) {
-      return res.status(400).json({ message: 'Agency ID is required' });
+    // If an agent is chosen but agency omitted, inherit agency from that agent (optional listings)
+    if (req.body.agent && !req.body.agency) {
+      const agentForAgency = await User.findById(req.body.agent).select('agency');
+      if (agentForAgency?.agency) {
+        req.body.agency = agentForAgency.agency;
+      }
     }
 
     if (!req.body.agent && req.user.role === 'agent') {
@@ -1011,17 +1128,19 @@ router.post('/', [
       return res.status(400).json({ errors: errors.array() });
     }
 
-    if (req.user.role === 'agency_admin' && req.body.agency !== req.user.agency) {
+    if (req.user.role === 'agency_admin' && req.body.agency && req.body.agency !== req.user.agency) {
       return res.status(403).json({ message: 'You can only create properties for your agency' });
     }
 
-    if (req.user.role === 'agent' && req.body.agent !== req.user.id) {
+    if (req.user.role === 'agent' && req.body.agent && req.body.agent !== req.user.id) {
       return res.status(403).json({ message: 'You can only create properties assigned to yourself' });
     }
 
-    const agency = await Agency.findById(req.body.agency);
-    if (!agency) {
-      return res.status(404).json({ message: 'Agency not found' });
+    if (req.body.agency) {
+      const agency = await Agency.findById(req.body.agency);
+      if (!agency) {
+        return res.status(404).json({ message: 'Agency not found' });
+      }
     }
 
     // Validate agent only if provided (required for agents, optional for agency_admin)
@@ -1033,10 +1152,10 @@ router.post('/', [
       if (!agent.isActive) {
         return res.status(400).json({ message: 'Agent account is not active. Please contact your agency admin.' });
       }
-      if (agent.agency && agent.agency.toString() !== req.body.agency) {
+      if (req.body.agency && agent.agency && agent.agency.toString() !== req.body.agency.toString()) {
         return res.status(400).json({ message: 'Agent does not belong to the specified agency' });
       }
-      if (!agent.agency) {
+      if (!agent.agency && req.body.agency) {
         return res.status(400).json({ message: 'Agent is not associated with an agency. Please contact the administrator.' });
       }
     } else if (req.user.role === 'agent') {
@@ -1048,6 +1167,9 @@ router.post('/', [
     if (req.user.role === 'agent') {
       req.body.status = 'pending';
     }
+
+    if (!req.body.agency) delete req.body.agency;
+    if (!req.body.agent) delete req.body.agent;
 
     const property = new Property({
       ...req.body,
@@ -1065,11 +1187,11 @@ router.post('/', [
     // Send notifications
     setImmediate(async () => {
       try {
-        // 1. Notify Agency Admins (if creator is not an agency admin)
-        if (req.user.role !== 'agency_admin') {
-          // Find all active agency admins for this agency
+        const agencyId = populatedProperty.agency?._id || populatedProperty.agency;
+        // 1. Notify Agency Admins (if creator is not an agency admin and listing has an agency)
+        if (req.user.role !== 'agency_admin' && agencyId) {
           const agencyAdmins = await User.find({
-            agency: populatedProperty.agency?._id || populatedProperty.agency,
+            agency: agencyId,
             role: 'agency_admin',
             isActive: true
           }).select('email');
@@ -1087,15 +1209,12 @@ router.post('/', [
         }
 
         // 2. Notify Assigned Agent (if creator is not the agent)
-        if (req.user.role !== 'agent' && populatedProperty.agent) {
-          // Check if agent is valid and has email
-          if (populatedProperty.agent.email) {
-            await emailService.sendNewPropertyNotificationToAgent(
-              populatedProperty,
-              populatedProperty.agent,
-              populatedProperty.agency
-            );
-          }
+        if (req.user.role !== 'agent' && populatedProperty.agent?.email) {
+          await emailService.sendNewPropertyNotificationToAgent(
+            populatedProperty,
+            populatedProperty.agent,
+            populatedProperty.agency
+          );
         }
       } catch (notifError) {
         console.error('Error sending new property notifications:', notifError);

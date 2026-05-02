@@ -123,6 +123,7 @@ app.use('/api/erp', require('./routes/erp'));
 app.use('/api/stats', require('./routes/stats'));
 app.use('/api/permissions', require('./routes/permissions'));
 app.use('/api/test-email', require('./routes/testEmail'));
+app.use('/api/currency', require('./routes/currency'));
 
 // --------------------
 // Health Check

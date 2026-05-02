@@ -10,7 +10,23 @@ let io;
 function initializeSocket(server) {
   io = new Server(server, {
     cors: {
-      origin: process.env.CLIENT_URL || 'http://localhost:3000',
+      origin: (origin, callback) => {
+        // Allow mobile/native clients (no Origin) and dev LAN access
+        if (!origin) return callback(null, true);
+
+        const allowed = [
+          process.env.CLIENT_URL,
+          'http://localhost:3000',
+          'http://localhost:3001'
+        ].filter(Boolean);
+
+        if (allowed.includes(origin)) return callback(null, true);
+
+        // In non-production, allow any origin to ease local/LAN development
+        if (process.env.NODE_ENV !== 'production') return callback(null, true);
+
+        return callback(new Error('Not allowed by CORS'));
+      },
       methods: ['GET', 'POST'],
       credentials: true
     }

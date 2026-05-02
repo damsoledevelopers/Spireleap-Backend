@@ -42,6 +42,8 @@ class EmailService {
         fromEmail = config.fromEmail || process.env.FROM_EMAIL;
         fromName = config.fromName || process.env.FROM_NAME;
 
+        console.log('smtpUser', smtpUser);
+
         console.log('EmailService: Configuration loaded:', {
           host: smtpHost,
           port: smtpPort,

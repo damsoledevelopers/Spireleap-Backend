@@ -5,6 +5,7 @@ const Agency = require('../models/Agency');
 const User = require('../models/User');
 const AgencyPermission = require('../models/AgencyPermission');
 const { auth, authorize, checkModulePermission } = require('../middleware/auth');
+const { normalizePhoneToE164 } = require('../utils/phone');
 
 const router = express.Router();
 
@@ -140,9 +141,21 @@ router.get('/:id', auth, checkModulePermission('agencies', 'view'), async (req, 
 // @desc    Create new agency and agency admin user
 // @access  Private (Super Admin only)
 router.post('/', auth, checkModulePermission('agencies', 'create'), [
-  body('name').trim().notEmpty().withMessage('Agency name is required'),
+  body('name')
+    .trim()
+    .notEmpty().withMessage('Agency name is required')
+    .matches(/^[A-Za-z\s.'-]+$/).withMessage('Agency name must contain only alphabets'),
   body('contact.email').isEmail().withMessage('Valid email is required'),
-  body('contact.phone').notEmpty().withMessage('Phone is required'),
+  body('contact.phone')
+    .trim()
+    .notEmpty()
+    .withMessage('Phone is required')
+    .bail()
+    .custom((v) => {
+      if (!normalizePhoneToE164(v)) throw new Error('Invalid phone number')
+      return true
+    })
+    .customSanitizer((v) => normalizePhoneToE164(v)),
   body('password').optional().isLength({ min: 6 }).withMessage('Password must be at least 6 characters')
 ], async (req, res) => {
   try {
@@ -295,6 +308,28 @@ router.put('/:id', auth, checkModulePermission('agencies', 'edit'), async (req, 
     const password = req.body.password;
     const updateData = { ...req.body };
     delete updateData.password;
+
+    if (updateData.name !== undefined && updateData.name !== null && String(updateData.name).trim() !== '') {
+      const nameVal = String(updateData.name).trim()
+      if (!/^[A-Za-z\s.'-]+$/.test(nameVal)) {
+        return res.status(400).json({
+          message: 'Validation failed',
+          errors: [{ msg: 'Agency name must contain only alphabets', path: 'name' }]
+        })
+      }
+      updateData.name = nameVal
+    }
+
+    if (updateData.contact && typeof updateData.contact === 'object' && updateData.contact.phone) {
+      const normalized = normalizePhoneToE164(updateData.contact.phone)
+      if (!normalized) {
+        return res.status(400).json({
+          message: 'Validation failed',
+          errors: [{ msg: 'Invalid phone number', path: 'contact.phone' }]
+        })
+      }
+      updateData.contact.phone = normalized
+    }
 
     // Update agency data
     Object.assign(agency, updateData);

@@ -3,8 +3,10 @@ const path = require('path');
 const fs = require('fs');
 const multer = require('multer');
 const { auth, authorize, checkModulePermission } = require('../middleware/auth');
+const cloudinaryService = require('../services/cloudinaryService');
 const { uploadSingle, uploadMultiple, uploadFields, deleteFile, getFileUrl, uploadDirs } = require('../middleware/upload');
 const Lead = require('../models/Lead');
+const User = require('../models/User');
 const encryptionService = require('../services/encryptionService');
 const emailService = require('../services/emailService');
 
@@ -161,6 +163,117 @@ router.post('/property-images', [
       message: error.message || 'Server error during upload',
       error: process.env.NODE_ENV === 'development' ? error.stack : undefined
     });
+  }
+});
+
+const PROFILE_IMAGE_MAX_BYTES = 5 * 1024 * 1024; // 5MB — profile avatars
+const ALLOWED_PROFILE_IMAGE_MIMES = ['image/jpeg', 'image/jpg', 'image/png', 'image/gif', 'image/webp'];
+
+const memoryProfileImageUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: PROFILE_IMAGE_MAX_BYTES },
+  fileFilter: (req, file, cb) => {
+    if (ALLOWED_PROFILE_IMAGE_MIMES.includes(file.mimetype)) {
+      cb(null, true);
+    } else {
+      cb(new Error('Only JPEG, PNG, GIF, and WebP images are allowed'), false);
+    }
+  }
+});
+
+// @route   POST /api/upload/cloudinary/profile-image
+// @desc    Upload super-admin profile image to Cloudinary (secrets stay on server)
+// @access  Private — super_admin only
+router.post('/cloudinary/profile-image', [auth, authorize('super_admin')], (req, res) => {
+  memoryProfileImageUpload.single('image')(req, res, async (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({
+          message: `File too large. Maximum size is ${PROFILE_IMAGE_MAX_BYTES / (1024 * 1024)}MB.`
+        });
+      }
+      return res.status(400).json({ message: err.message });
+    }
+    if (err) {
+      return res.status(400).json({ message: err.message });
+    }
+    if (!req.file || !req.file.buffer) {
+      return res.status(400).json({ message: 'No file uploaded' });
+    }
+    if (!cloudinaryService.isConfigured()) {
+      return res.status(503).json({
+        message:
+          'Cloudinary is not configured on the server. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.'
+      });
+    }
+
+    try {
+      const dbUser = await User.findById(req.user.id).select('profileImage').lean();
+      const previousUrl = dbUser?.profileImage || '';
+
+      const { secure_url, public_id, width, height } = await cloudinaryService.uploadUserProfileAvatar(
+        req.user.id,
+        req.file.buffer,
+        req.file.mimetype,
+        previousUrl
+      );
+
+      return res.json({
+        message: 'Profile image uploaded successfully',
+        secure_url,
+        public_id,
+        storage_prefix: cloudinaryService.getProfileStoragePrefix(),
+        file: {
+          url: secure_url,
+          public_id,
+          originalName: req.file.originalname,
+          size: req.file.size,
+          mimetype: req.file.mimetype,
+          width,
+          height
+        }
+      });
+    } catch (uploadErr) {
+      console.error('Cloudinary profile upload error:', uploadErr);
+      const { status, message } = cloudinaryService.formatUploadError(uploadErr);
+      return res.status(status).json({
+        message,
+        ...(process.env.NODE_ENV === 'development' && {
+          detail: uploadErr?.message,
+          http_code: uploadErr?.http_code
+        })
+      });
+    }
+  });
+});
+
+// @route   DELETE /api/upload/cloudinary/profile-image
+// @desc    Remove super-admin profile image from Cloudinary and clear DB field
+// @access  Private — super_admin only
+router.delete('/cloudinary/profile-image', [auth, authorize('super_admin')], async (req, res) => {
+  try {
+    if (!cloudinaryService.isConfigured()) {
+      return res.status(503).json({
+        message:
+          'Cloudinary is not configured on the server. Set CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, and CLOUDINARY_API_SECRET.'
+      });
+    }
+
+    const dbUser = await User.findById(req.user.id).select('profileImage').lean();
+    const previousUrl = dbUser?.profileImage || '';
+
+    await cloudinaryService.removeUserProfileAvatar(req.user.id, previousUrl);
+
+    await User.findByIdAndUpdate(req.user.id, { $set: { profileImage: '' } }, { runValidators: false });
+
+    return res.json({
+      message: 'Profile image removed',
+      storage_prefix: cloudinaryService.getProfileStoragePrefix(),
+      profileImage: ''
+    });
+  } catch (err) {
+    console.error('Cloudinary profile delete error:', err);
+    return res.status(500).json({ message: err.message || 'Failed to remove profile image' });
   }
 });
 

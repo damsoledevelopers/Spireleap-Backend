@@ -1,10 +1,27 @@
 const mongoose = require('mongoose');
 
+const ALPHA_TEXT_REGEX = /^[A-Za-z\s.'-]+$/;
+const ZIP_REGEX = /^(\d{5}|\d{9})$/;
+
+const isAlphaTextOrEmpty = (v) => {
+  if (v === null || v === undefined) return true;
+  const s = String(v).trim();
+  if (!s) return true;
+  return ALPHA_TEXT_REGEX.test(s);
+};
+
+const isZipOrEmpty = (v) => {
+  if (v === null || v === undefined) return true;
+  const s = String(v).trim();
+  if (!s) return true;
+  return ZIP_REGEX.test(s);
+};
+
 const propertySchema = new mongoose.Schema({
   title: {
     type: String,
-    required: [true, 'Property title is required'],
-    trim: true
+    trim: true,
+    default: ''
   },
   slug: {
     type: String,
@@ -14,7 +31,7 @@ const propertySchema = new mongoose.Schema({
   },
   description: {
     type: String,
-    required: [true, 'Property description is required']
+    default: ''
   },
   propertyType: {
     type: String,
@@ -49,21 +66,32 @@ const propertySchema = new mongoose.Schema({
   location: {
     address: {
       type: String,
-      required: [true, 'Address is required']
+      trim: true,
+      default: ''
     },
     city: {
       type: String,
-      required: [true, 'City is required']
+      trim: true,
+      default: '',
+      validate: { validator: isAlphaTextOrEmpty, message: 'City must contain only alphabets' }
     },
     state: {
       type: String,
-      required: [true, 'State is required']
+      trim: true,
+      default: '',
+      validate: { validator: isAlphaTextOrEmpty, message: 'State must contain only alphabets' }
     },
     country: {
       type: String,
-      required: [true, 'Country is required']
+      trim: true,
+      default: '',
+      validate: { validator: isAlphaTextOrEmpty, message: 'Country must contain only alphabets' }
     },
-    zipCode: String,
+    zipCode: {
+      type: String,
+      trim: true,
+      validate: { validator: isZipOrEmpty, message: 'Zip code must be 5 digits or 9 digits (ZIP+4)' }
+    },
     coordinates: {
       lat: {
         type: Number
@@ -112,7 +140,6 @@ const propertySchema = new mongoose.Schema({
     area: {
       value: {
         type: Number,
-        required: [true, 'Area is required'],
         min: 0
       },
       unit: {
@@ -178,12 +205,26 @@ const propertySchema = new mongoose.Schema({
   agency: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Agency',
-    required: [true, 'Agency is required']
+    default: null
   },
   agent: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
-    required: [true, 'Agent is required']
+    default: null
+  },
+  regulatoryInformation: {
+    reference: { type: String, trim: true },
+    listedAt: { type: Date },
+    brokerLicense: { type: String, trim: true },
+    agencyName: { type: String, trim: true },
+    zoneName: { type: String, trim: true },
+    agentLicense: { type: String, trim: true },
+    dldPermitNumber: { type: String, trim: true },
+    // QR image can be a hosted URL or a data URL (base64) sent from frontend.
+    // Prefer URL for size/performance.
+    qrImage: { type: String, trim: true },
+    // Optional: the QR payload/value (e.g., a listing URL) if you want to regenerate QR later.
+    qrValue: { type: String, trim: true }
   },
   status: {
     type: String,
@@ -272,13 +313,18 @@ const propertySchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Generate slug before saving
+// Title default and unique slug before saving
 propertySchema.pre('save', function (next) {
-  if (this.isModified('title') && !this.slug) {
-    this.slug = this.title
+  if (!this.title || !String(this.title).trim()) {
+    this.title = 'Property listing';
+  }
+  if (!this.slug) {
+    const base = String(this.title)
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '-')
-      .replace(/(^-|-$)/g, '');
+      .replace(/(^-|-$)/g, '') || 'property';
+    const idPart = this._id ? String(this._id).slice(-8) : Math.random().toString(36).slice(2, 10);
+    this.slug = `${base}-${idPart}`;
   }
   next();
 });

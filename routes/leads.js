@@ -12,10 +12,64 @@ const leadAssignmentService = require('../services/leadAssignmentService');
 const leadScoringService = require('../services/leadScoringService');
 const webhookService = require('../services/webhookService');
 const encryptionService = require('../services/encryptionService');
+const { normalizePhoneToE164 } = require('../utils/phone');
 
 const router = express.Router();
 
 const activeStatuses = ['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation'];
+
+// @route   GET /api/leads/field-options
+// @desc    Get dropdown options for lead creation fields
+// @access  Public
+router.get('/field-options', optionalAuth, async (req, res) => {
+  try {
+    // Served by backend so UI stays dynamic (can later move into Settings if needed).
+    res.json({
+      preferredRooms: [
+        { value: 'studio', label: 'Studio' },
+        { value: '1', label: '1 Room' },
+        { value: '2', label: '2 Rooms' },
+        { value: '3', label: '3 Rooms' },
+        { value: '4', label: '4 Rooms' },
+        { value: '5_plus', label: '5+ Rooms' }
+      ],
+      preferredSize: [
+        { value: '0_500', label: '0 - 500 sqft' },
+        { value: '500_1000', label: '500 - 1000 sqft' },
+        { value: '1000_1500', label: '1000 - 1500 sqft' },
+        { value: '1500_2000', label: '1500 - 2000 sqft' },
+        { value: '2000_plus', label: '2000+ sqft' }
+      ],
+      buyerType: [
+        { value: 'end_user', label: 'End User' },
+        { value: 'investor', label: 'Investor' },
+        { value: 'agent', label: 'Agent / Broker' },
+        { value: 'company', label: 'Company' },
+        { value: 'other', label: 'Other' }
+      ],
+      paymentMethod: [
+        { value: 'cash', label: 'Cash' },
+        { value: 'mortgage', label: 'Mortgage' },
+        { value: 'bank_transfer', label: 'Bank Transfer' },
+        { value: 'cheque', label: 'Cheque' },
+        { value: 'crypto', label: 'Crypto' },
+        { value: 'other', label: 'Other' }
+      ],
+      spokenLanguages: [
+        { value: 'english', label: 'English' },
+        { value: 'arabic', label: 'Arabic' },
+        { value: 'french', label: 'French' },
+        { value: 'spanish', label: 'Spanish' },
+        { value: 'hindi', label: 'Hindi' },
+        { value: 'urdu', label: 'Urdu' },
+        { value: 'other', label: 'Other' }
+      ]
+    });
+  } catch (error) {
+    console.error('Get lead field options error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
 
 
 // Helper function to normalize lead priority
@@ -676,7 +730,16 @@ router.post('/', optionalAuth, [
   body('contact.firstName').trim().notEmpty().withMessage('First name is required'),
   body('contact.lastName').trim().notEmpty().withMessage('Last name is required'),
   body('contact.email').isEmail().withMessage('Valid email is required'),
-  body('contact.phone').optional().trim()
+  body('contact.phone')
+    .trim()
+    .notEmpty()
+    .withMessage('Phone is required')
+    .bail()
+    .custom((v) => {
+      if (!normalizePhoneToE164(v)) throw new Error('Invalid phone number')
+      return true
+    })
+    .customSanitizer((v) => normalizePhoneToE164(v))
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -1243,6 +1306,26 @@ router.put('/:id', auth, checkModulePermission('leads', 'edit'), async (req, res
 
     // Encrypt contact information if being updated
     if (req.body.contact) {
+      if (req.body.contact.phone) {
+        const normalized = normalizePhoneToE164(req.body.contact.phone)
+        if (!normalized) {
+          return res.status(400).json({
+            message: 'Validation failed',
+            errors: [{ msg: 'Invalid phone number', path: 'contact.phone' }]
+          })
+        }
+        req.body.contact.phone = normalized
+      }
+      if (req.body.contact.alternatePhone) {
+        const normalizedAlt = normalizePhoneToE164(req.body.contact.alternatePhone)
+        if (!normalizedAlt) {
+          return res.status(400).json({
+            message: 'Validation failed',
+            errors: [{ msg: 'Invalid phone number', path: 'contact.alternatePhone' }]
+          })
+        }
+        req.body.contact.alternatePhone = normalizedAlt
+      }
       req.body.contact = encryptionService.encryptLeadContact(req.body.contact);
     }
 
@@ -2139,6 +2222,127 @@ router.put('/:id/assign', auth, checkModulePermission('leads', 'edit'), [
     res.status(500).json({ message: 'Server error' });
   }
 });
+
+// @route   POST /api/leads/:id/convert-to-client
+// @desc    Convert a lead into a client user (creates user and removes lead)
+// @access  Private
+router.post('/:id/convert-to-client',
+  auth,
+  checkModulePermission('leads', 'edit'),
+  checkModulePermission('users', 'create'),
+  [
+    body('password')
+      .isLength({ min: 6 })
+      .withMessage('Password must be at least 6 characters')
+  ],
+  async (req, res) => {
+    try {
+      const errors = validationResult(req);
+      if (!errors.isEmpty()) {
+        return res.status(400).json({ errors: errors.array() });
+      }
+
+      const lead = await Lead.findById(req.params.id);
+      if (!lead) {
+        return res.status(404).json({ message: 'Lead not found' });
+      }
+
+      // SECURITY: Validate per-entry permissions
+      const entryPermCheck = validateEntryPermission(lead, req.user, 'edit');
+      if (!entryPermCheck.allowed) {
+        return res.status(403).json({
+          message: 'Access denied by entry-level restriction',
+          reason: entryPermCheck.reason
+        });
+      }
+
+      // SECURITY: Validate agency isolation
+      const agencyCheck = validateAgencyIsolation(lead, req.user);
+      if (!agencyCheck.allowed) {
+        return res.status(403).json({
+          message: 'Access denied. You can only update leads from your agency.',
+          reason: agencyCheck.reason
+        });
+      }
+
+      // SECURITY: Agent can only convert leads assigned to them (unless they manage the property)
+      if (req.user.role === 'agent') {
+        const agentId = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
+        const assignedAgentId = lead.assignedAgent?._id
+          ? lead.assignedAgent._id.toString()
+          : (lead.assignedAgent?.toString() || lead.assignedAgent);
+
+        const isPropertyManager = await Property.exists({ _id: lead.property, agent: agentId });
+        if (assignedAgentId !== req.user.id && !isPropertyManager) {
+          return res.status(403).json({ message: 'Access denied. This lead is not assigned to you.' });
+        }
+      }
+
+      const decryptedContact = lead.contact ? encryptionService.decryptLeadContact(lead.contact) : null;
+      if (!decryptedContact?.email) {
+        return res.status(400).json({ message: 'Lead does not have a valid email to create a client account' });
+      }
+
+      const normalizedEmail = String(decryptedContact.email).toLowerCase().trim();
+      const existingUser = await User.findOne({ email: normalizedEmail });
+      if (existingUser) {
+        return res.status(400).json({ message: 'User already exists with this email' });
+      }
+
+      const password = String(req.body.password || '').trim();
+
+      const userData = {
+        firstName: decryptedContact.firstName || 'Client',
+        lastName: decryptedContact.lastName || 'User',
+        email: normalizedEmail,
+        password,
+        role: 'user',
+        isActive: true,
+        phone: decryptedContact.phone,
+        address: decryptedContact.address,
+        agency: lead.agency || undefined
+      };
+
+      const createdUser = new User(userData);
+      await createdUser.save();
+
+      // Remove lead so it disappears from leads table as requested
+      await Lead.deleteOne({ _id: lead._id });
+
+      // Send welcome email (Non-blocking)
+      setImmediate(async () => {
+        try {
+          await emailService.sendWelcomeEmail(createdUser);
+        } catch (emailError) {
+          console.error('Failed to send welcome email after conversion:', emailError);
+        }
+      });
+
+      return res.status(201).json({
+        message: 'Lead converted to client successfully',
+        user: {
+          id: createdUser._id,
+          firstName: createdUser.firstName,
+          lastName: createdUser.lastName,
+          email: createdUser.email,
+          role: createdUser.role,
+          agency: createdUser.agency,
+          isActive: createdUser.isActive
+        },
+        leadId: req.params.id
+      });
+    } catch (error) {
+      console.error('Convert lead to client error:', error);
+
+      // Handle duplicate key error (email already exists)
+      if (error.code === 11000 || error.name === 'MongoServerError') {
+        return res.status(400).json({ message: 'User already exists with this email' });
+      }
+
+      return res.status(500).json({ message: 'Server error' });
+    }
+  }
+);
 
 // @route   POST /api/leads/:id/auto-assign
 // @desc    Auto-assign lead using specified method

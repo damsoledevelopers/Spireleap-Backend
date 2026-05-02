@@ -1,11 +1,14 @@
 const mongoose = require('mongoose');
 
+const NAME_REGEX = /^[A-Za-z\s.'-]+$/;
+
 const amenitySchema = new mongoose.Schema({
   name: {
     type: String,
     required: [true, 'Amenity name is required'],
     unique: true,
-    trim: true
+    trim: true,
+    match: [NAME_REGEX, 'Amenity name must contain only alphabets']
   },
   slug: {
     type: String,

@@ -308,6 +308,7 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
 
     let leadFilter = { ...dateFilter };
     let propertyFilter = { ...dateFilter };
+    let userFilter = { ...dateFilter };
 
     const agencyIdForFilter = req.user.agency && mongoose.Types.ObjectId.isValid(req.user.agency)
       ? new mongoose.Types.ObjectId(req.user.agency)
@@ -317,6 +318,7 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
     if (req.user.role === 'agency_admin') {
       leadFilter.agency = req.user.agency;
       propertyFilter.agency = req.user.agency;
+      userFilter.agency = req.user.agency;
     } else if (req.user.role === 'agent') {
       const agentId = mongoose.Types.ObjectId.isValid(req.user.id) ? new mongoose.Types.ObjectId(req.user.id) : req.user.id;
       const agentProperties = await Property.find({ agent: agentId }).distinct('_id');
@@ -332,6 +334,7 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
 
       propertyFilter.agent = agentId;
       propertyFilter.agency = req.user.agency;
+      userFilter.agency = req.user.agency;
     }
 
     // Use aggregation for efficient statistics
@@ -344,6 +347,10 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       leadsBySource,
       leadsByPriority,
       usersByRole,
+      totalUsers,
+      activeUsers,
+      totalProperties,
+      totalLeads,
       totalPropertyValue,
       recentProperties,
       recentLeads,
@@ -440,6 +447,18 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
           }
         ])
         : Promise.resolve([]),
+
+      // Total users (role-scoped for agency_admin/agent)
+      User.countDocuments(userFilter),
+
+      // Active users (role-scoped for agency_admin/agent)
+      User.countDocuments({ ...userFilter, isActive: true }),
+
+      // Total properties in this period/scope
+      Property.countDocuments(propertyFilter),
+
+      // Total leads in this period/scope
+      Lead.countDocuments(leadFilter),
 
       // Total property value (sale prices only)
       Property.aggregate([
@@ -619,6 +638,13 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
     }
 
     res.json({
+      totalUsers,
+      totalProperties,
+      totalLeads,
+      userStats: {
+        activeUsers,
+        inactiveUsers: Math.max(totalUsers - activeUsers, 0)
+      },
       propertiesByStatus: formatStats(propertiesByStatus),
       propertiesByType: formatStats(propertiesByType),
       propertiesByListingType: formatStats(propertiesByListingType),

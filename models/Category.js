@@ -1,11 +1,14 @@
 const mongoose = require('mongoose');
 
+const NAME_REGEX = /^[A-Za-z\s.'-]+$/;
+
 const categorySchema = new mongoose.Schema({
   name: {
     type: String,
     required: [true, 'Category name is required'],
     unique: true,
-    trim: true
+    trim: true,
+    match: [NAME_REGEX, 'Category name must contain only alphabets']
   },
   slug: {
     type: String,

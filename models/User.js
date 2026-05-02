@@ -1,16 +1,36 @@
 const mongoose = require('mongoose');
 const bcrypt = require('bcryptjs');
 
+const NAME_REGEX = /^[A-Za-z\s.'-]+$/;
+const ALPHA_TEXT_REGEX = /^[A-Za-z\s.'-]+$/;
+const ZIP_REGEX = /^(\d{5}|\d{9})$/;
+
+const isAlphaTextOrEmpty = (v) => {
+  if (v === null || v === undefined) return true;
+  const s = String(v).trim();
+  if (!s) return true;
+  return ALPHA_TEXT_REGEX.test(s);
+};
+
+const isZipOrEmpty = (v) => {
+  if (v === null || v === undefined) return true;
+  const s = String(v).trim();
+  if (!s) return true;
+  return ZIP_REGEX.test(s);
+};
+
 const userSchema = new mongoose.Schema({
   firstName: {
     type: String,
     required: [true, 'First name is required'],
-    trim: true
+    trim: true,
+    match: [NAME_REGEX, 'First name must contain only alphabets']
   },
   lastName: {
     type: String,
     required: [true, 'Last name is required'],
-    trim: true
+    trim: true,
+    match: [NAME_REGEX, 'Last name must contain only alphabets']
   },
   email: {
     type: String,
@@ -51,10 +71,26 @@ const userSchema = new mongoose.Schema({
   },
   address: {
     street: String,
-    city: String,
-    state: String,
-    country: String,
-    zipCode: String
+    city: {
+      type: String,
+      trim: true,
+      validate: { validator: isAlphaTextOrEmpty, message: 'City must contain only alphabets' }
+    },
+    state: {
+      type: String,
+      trim: true,
+      validate: { validator: isAlphaTextOrEmpty, message: 'State must contain only alphabets' }
+    },
+    country: {
+      type: String,
+      trim: true,
+      validate: { validator: isAlphaTextOrEmpty, message: 'Country must contain only alphabets' }
+    },
+    zipCode: {
+      type: String,
+      trim: true,
+      validate: { validator: isZipOrEmpty, message: 'Zip code must be 5 digits or 9 digits (ZIP+4)' }
+    }
   },
   isActive: {
     type: Boolean,

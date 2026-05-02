@@ -3,8 +3,6 @@ const { body, validationResult } = require('express-validator');
 const Blog = require('../models/Blog');
 const Page = require('../models/Page');
 const Banner = require('../models/Banner');
-const Category = require('../models/Category');
-const Amenity = require('../models/Amenity');
 const Testimonial = require('../models/Testimonial');
 const ContactMessage = require('../models/ContactMessage');
 const Footer = require('../models/Footer');
@@ -15,6 +13,7 @@ const Lead = require('../models/Lead');
 const emailService = require('../services/emailService');
 const leadScoringService = require('../services/leadScoringService');
 const { auth, authorize, optionalAuth, checkModulePermission } = require('../middleware/auth');
+const { normalizePhoneToE164 } = require('../utils/phone');
 
 const router = express.Router();
 
@@ -363,200 +362,6 @@ router.delete('/banners/:id', auth, checkModulePermission('cms', 'delete'), asyn
   }
 });
 
-// ==================== CATEGORIES ====================
-
-// @route   GET /api/cms/categories
-// @desc    Get all categories
-// @access  Public (with optional auth for admin access)
-router.get('/categories', optionalAuth, async (req, res) => {
-  try {
-    const filter = {};
-    // Only show active categories to non-admin users
-    // Admins can see all categories including inactive ones
-    if (!req.user || (req.user.role !== 'super_admin' && req.user.role !== 'agency_admin')) {
-      filter.isActive = true;
-    }
-    const categories = await Category.find(filter).sort('order');
-    res.json({ categories });
-  } catch (error) {
-    console.error('Get categories error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// @route   POST /api/cms/categories
-// @desc    Create category
-// @access  Private (Super Admin)
-router.post('/categories', auth, checkModulePermission('cms', 'create'), [
-  body('name').trim().notEmpty().withMessage('Category name is required')
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
-
-    const category = new Category(req.body);
-    await category.save();
-    res.status(201).json({ category });
-  } catch (error) {
-    console.error('Create category error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// @route   PUT /api/cms/categories/:id
-// @desc    Update category
-// @access  Private
-router.put('/categories/:id', auth, checkModulePermission('cms', 'edit'), async (req, res) => {
-  try {
-    const category = await Category.findById(req.params.id);
-    if (!category) {
-      return res.status(404).json({ message: 'Category not found' });
-    }
-
-    Object.assign(category, req.body);
-    await category.save();
-    res.json({ category });
-  } catch (error) {
-    console.error('Update category error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// @route   DELETE /api/cms/categories/:id
-// @desc    Delete category
-// @access  Private
-router.delete('/categories/:id', auth, checkModulePermission('cms', 'delete'), async (req, res) => {
-  try {
-    const category = await Category.findById(req.params.id);
-    if (!category) {
-      return res.status(404).json({ message: 'Category not found' });
-    }
-
-    await category.deleteOne();
-    res.json({ message: 'Category deleted successfully' });
-  } catch (error) {
-    console.error('Delete category error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// ==================== AMENITIES ====================
-
-// @route   GET /api/cms/amenities
-// @desc    Get all amenities
-// @access  Public (with optional auth for admin access)
-router.get('/amenities', optionalAuth, async (req, res) => {
-  try {
-    const filter = {};
-    // Only show active amenities to non-admin users
-    // Admins can see all amenities including inactive ones
-    if (!req.user || (req.user.role !== 'super_admin' && req.user.role !== 'agency_admin')) {
-      filter.isActive = true;
-    }
-    if (req.query.category) {
-      filter.category = req.query.category;
-    }
-    const amenities = await Amenity.find(filter).sort('order');
-    res.json({ amenities });
-  } catch (error) {
-    console.error('Get amenities error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// @route   POST /api/cms/amenities
-// @desc    Create amenity
-// @access  Private (Super Admin)
-router.post('/amenities', auth, checkModulePermission('cms', 'create'), [
-  body('name').trim().notEmpty().withMessage('Amenity name is required'),
-  body('category')
-    .optional({ values: 'falsy' })
-    .custom((value) => {
-      if (!value || value === '') return true; // Allow empty strings
-      return ['interior', 'exterior', 'community', 'security', 'other'].includes(value);
-    })
-    .withMessage('Invalid category')
-], async (req, res) => {
-  try {
-    const errors = validationResult(req);
-    if (!errors.isEmpty()) {
-      return res.status(400).json({ errors: errors.array() });
-    }
-
-    // Clean up the data - only send valid fields
-    const amenityData = {
-      name: req.body.name.trim(),
-      icon: req.body.icon?.trim() || undefined,
-      category: req.body.category && req.body.category.trim() && ['interior', 'exterior', 'community', 'security', 'other'].includes(req.body.category.trim())
-        ? req.body.category.trim()
-        : 'other',
-      order: parseInt(req.body.order) || 0,
-      isActive: req.body.isActive !== undefined ? Boolean(req.body.isActive) : true
-    };
-
-    const amenity = new Amenity(amenityData);
-    await amenity.save();
-    res.status(201).json({ amenity });
-  } catch (error) {
-    console.error('Create amenity error:', error);
-
-    // Return more specific error messages
-    if (error.name === 'ValidationError') {
-      const errors = Object.values(error.errors).map(err => err.message);
-      return res.status(400).json({ message: 'Validation error', errors });
-    }
-
-    if (error.code === 11000) {
-      // Duplicate key error (unique constraint violation)
-      return res.status(400).json({ message: 'An amenity with this name already exists' });
-    }
-
-    res.status(500).json({
-      message: error.message || 'Server error',
-      error: process.env.NODE_ENV === 'development' ? error.stack : undefined
-    });
-  }
-});
-
-// @route   PUT /api/cms/amenities/:id
-// @desc    Update amenity
-// @access  Private
-router.put('/amenities/:id', auth, checkModulePermission('cms', 'edit'), async (req, res) => {
-  try {
-    const amenity = await Amenity.findById(req.params.id);
-    if (!amenity) {
-      return res.status(404).json({ message: 'Amenity not found' });
-    }
-
-    Object.assign(amenity, req.body);
-    await amenity.save();
-    res.json({ amenity });
-  } catch (error) {
-    console.error('Update amenity error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
-// @route   DELETE /api/cms/amenities/:id
-// @desc    Delete amenity
-// @access  Private
-router.delete('/amenities/:id', auth, checkModulePermission('cms', 'delete'), async (req, res) => {
-  try {
-    const amenity = await Amenity.findById(req.params.id);
-    if (!amenity) {
-      return res.status(404).json({ message: 'Amenity not found' });
-    }
-
-    await amenity.deleteOne();
-    res.json({ message: 'Amenity deleted successfully' });
-  } catch (error) {
-    console.error('Delete amenity error:', error);
-    res.status(500).json({ message: 'Server error' });
-  }
-});
-
 // ==================== TESTIMONIALS ====================
 
 // @route   GET /api/cms/testimonials
@@ -681,6 +486,13 @@ router.get('/contact-messages', auth, checkModulePermission('contact_messages', 
 router.post('/contact-messages', [
   body('name').trim().notEmpty().withMessage('Name is required'),
   body('email').isEmail().withMessage('Valid email is required'),
+  body('phone')
+    .optional({ values: 'falsy' })
+    .custom((v) => {
+      if (!normalizePhoneToE164(v)) throw new Error('Invalid phone number')
+      return true
+    })
+    .customSanitizer((v) => normalizePhoneToE164(v)),
   body('message').trim().notEmpty().withMessage('Message is required')
 ], async (req, res) => {
   try {

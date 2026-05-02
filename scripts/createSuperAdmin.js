@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const mongoose = require('mongoose');
 const User = require('../models/User');
 require('dotenv').config();
@@ -16,9 +17,12 @@ async function createSuperAdmin() {
     console.log('✅ MongoDB connected');
     console.log(`📊 Database: ${mongoose.connection.name}\n`);
 
-    // Super Admin credentials
-    const adminEmail = 'superadmin@novakeys.com';
-    const adminPassword = 'Admin@123456';
+    // Super Admin credentials (SUPER_ADMIN_EMAIL / SUPER_ADMIN_PASSWORD in .env optional)
+    const adminEmail = (process.env.SUPER_ADMIN_EMAIL || 'superadmin@novakeys.com').toLowerCase().trim();
+    const adminPassword =
+      process.env.SUPER_ADMIN_PASSWORD && String(process.env.SUPER_ADMIN_PASSWORD).length >= 6
+        ? process.env.SUPER_ADMIN_PASSWORD
+        : crypto.randomBytes(9).toString('base64url');
     
     // Check if super admin already exists
     const existingAdmin = await User.findOne({ 
