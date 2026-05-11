@@ -3,6 +3,8 @@ const { body, validationResult } = require('express-validator');
 const mongoose = require('mongoose');
 const Agency = require('../models/Agency');
 const User = require('../models/User');
+const Property = require('../models/Property');
+const Lead = require('../models/Lead');
 const AgencyPermission = require('../models/AgencyPermission');
 const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 const { normalizePhoneToE164 } = require('../utils/phone');
@@ -47,14 +49,78 @@ router.get('/', auth, checkModulePermission('agencies', 'view'), async (req, res
 
     const total = await Agency.countDocuments(filter);
 
+    let agencyTotals = null;
+    if (req.query.includeAgencyTotals === 'true') {
+      const filterForAgencyTotals = { ...filter };
+      delete filterForAgencyTotals.isActive;
+      const [activeAgencyCount, inactiveAgencyCount] = await Promise.all([
+        Agency.countDocuments({ ...filterForAgencyTotals, isActive: true }),
+        Agency.countDocuments({ ...filterForAgencyTotals, isActive: false })
+      ]);
+      agencyTotals = { active: activeAgencyCount, inactive: inactiveAgencyCount };
+    }
+
+    /** Live counts aligned with Reports (stats.js agencyAnalysis), not cached agency.stats */
+    let responseAgencies = agencies;
+    if (agencies.length > 0) {
+      const agencyIds = agencies.map((a) => a._id);
+      const [agentsByAgency, propertiesByAgency, leadsByAgency] = await Promise.all([
+        User.aggregate([
+          { $match: { role: 'agent', agency: { $in: agencyIds } } },
+          {
+            $group: {
+              _id: '$agency',
+              totalAgents: { $sum: 1 },
+              activeAgents: { $sum: { $cond: ['$isActive', 1, 0] } }
+            }
+          }
+        ]),
+        Property.aggregate([
+          { $match: { agency: { $in: agencyIds } } },
+          {
+            $group: {
+              _id: '$agency',
+              totalProperties: { $sum: 1 },
+              activeProperties: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } }
+            }
+          }
+        ]),
+        Lead.aggregate([
+          { $match: { agency: { $in: agencyIds } } },
+          { $group: { _id: '$agency', totalLeads: { $sum: 1 } } }
+        ])
+      ]);
+      const agentsMap = Object.fromEntries((agentsByAgency || []).map((x) => [x._id?.toString(), x]));
+      const propsMap = Object.fromEntries((propertiesByAgency || []).map((x) => [x._id?.toString(), x]));
+      const leadsMap = Object.fromEntries((leadsByAgency || []).map((x) => [x._id?.toString(), x]));
+      responseAgencies = agencies.map((agency) => {
+        const id = agency._id.toString();
+        const ag = agentsMap[id] || {};
+        const pr = propsMap[id] || {};
+        const ld = leadsMap[id] || {};
+        const obj = agency.toObject();
+        const prevStats = obj.stats && typeof obj.stats === 'object' ? { ...obj.stats } : {};
+        obj.stats = {
+          ...prevStats,
+          totalAgents: ag.totalAgents || 0,
+          activeAgents: ag.activeAgents || 0,
+          totalProperties: pr.totalProperties || 0,
+          activeProperties: pr.activeProperties || 0,
+          totalLeads: ld.totalLeads || 0
+        };
+        return obj;
+      });
+    }
+
     res.json({
-      agencies,
+      agencies: responseAgencies,
       pagination: {
         page,
         limit,
         total,
         pages: Math.ceil(total / limit)
-      }
+      },
+      ...(agencyTotals ? { agencyTotals } : {})
     });
   } catch (error) {
     console.error('Get agencies error:', error);
@@ -431,9 +497,6 @@ router.get('/:id/stats', auth, checkModulePermission('agencies', 'view'), async 
     if (req.user.role === 'agency_admin' && agency._id.toString() !== req.user.agency) {
       return res.status(403).json({ message: 'Access denied' });
     }
-
-    const Property = require('../models/Property');
-    const Lead = require('../models/Lead');
 
     const stats = {
       totalProperties: await Property.countDocuments({ agency: agency._id }),

@@ -241,16 +241,27 @@ class LeadAssignmentService {
     try {
       if (assignmentMethod === 'smart') {
         return await this.smartAssignment(agencyId, leadData);
-      } else if (assignmentMethod === 'workload') {
+      }
+      if (assignmentMethod === 'workload') {
         return await this.workloadBasedAssignment(agencyId);
-      } else if (assignmentMethod === 'location' && leadData.inquiry?.preferredLocation) {
-        return await this.locationBasedAssignment(agencyId, leadData.inquiry.preferredLocation);
-      } else if (assignmentMethod === 'project' && leadData.property) {
-        return await this.projectBasedAssignment(agencyId, leadData.property);
-      } else {
-        // Default to round-robin
+      }
+      if (assignmentMethod === 'source' && leadData.source) {
+        const bySource = await this.sourceBasedAssignment(agencyId, leadData.source);
+        if (bySource) return bySource;
         return await this.roundRobinAssignment(agencyId);
       }
+      if (assignmentMethod === 'location' && leadData.inquiry?.preferredLocation) {
+        const byLoc = await this.locationBasedAssignment(agencyId, leadData.inquiry.preferredLocation);
+        if (byLoc) return byLoc;
+        return await this.roundRobinAssignment(agencyId);
+      }
+      if (assignmentMethod === 'project' && leadData.property) {
+        const byProj = await this.projectBasedAssignment(agencyId, leadData.property);
+        if (byProj) return byProj;
+        return await this.roundRobinAssignment(agencyId);
+      }
+      // Default to round-robin (e.g. location/project/source chosen but no matching data on lead)
+      return await this.roundRobinAssignment(agencyId);
     } catch (error) {
       console.error('Auto-assign lead error:', error);
       return null;

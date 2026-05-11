@@ -10,10 +10,11 @@ const paymentService = require('../services/paymentService');
 // GET /api/subscriptions/plans
 router.get('/plans', async (req, res) => {
   try {
-    const { search, interval, isActive, price_min, price_max } = req.query;
+    const { search, interval, isActive, price_min, price_max, currency } = req.query;
     const q = {};
+    const andConditions = [];
 
-    if (isActive !== undefined) q.isActive = isActive === 'true';
+    if (isActive !== undefined && isActive !== '') q.isActive = isActive === 'true';
     if (interval) q.interval = interval;
     if (price_min || price_max) {
       q.price = {};
@@ -21,10 +22,32 @@ router.get('/plans', async (req, res) => {
       if (price_max) q.price.$lte = Number(price_max);
     }
     if (search) {
-      q.$or = [
-        { name: { $regex: search, $options: 'i' } },
-        { description: { $regex: search, $options: 'i' } }
-      ];
+      andConditions.push({
+        $or: [
+          { plan_name: { $regex: search, $options: 'i' } },
+          { name: { $regex: search, $options: 'i' } },
+          { description: { $regex: search, $options: 'i' } }
+        ]
+      });
+    }
+    if (currency && String(currency).trim()) {
+      const c = String(currency).trim().toUpperCase();
+      if (c === 'INR') {
+        andConditions.push({
+          $or: [
+            { currency: 'INR' },
+            { currency: { $exists: false } },
+            { currency: null },
+            { currency: '' }
+          ]
+        });
+      } else {
+        q.currency = c;
+      }
+    }
+
+    if (andConditions.length) {
+      q.$and = andConditions;
     }
 
     const plans = await Plan.find(q).sort({ price: 1 });
@@ -47,12 +70,16 @@ router.post('/plans',
     try {
       const errors = validationResult(req);
       if (!errors.isEmpty()) return res.status(400).json({ errors: errors.array() });
-      const { name, description, price, interval, features, isActive, validity_days } = req.body;
+      const { name, description, price, interval, features, isActive, validity_days, currency } = req.body;
+      const cur = currency != null && String(currency).trim()
+        ? String(currency).trim().toUpperCase()
+        : 'INR';
       const plan = new Plan({
         plan_name: name, // Set plan_name from name
         name,
         description,
         price: price || 0,
+        currency: cur,
         interval: interval || 'monthly',
         features: features || [],
         isActive: isActive !== false,

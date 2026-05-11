@@ -9,6 +9,11 @@ const { auth, authorize, checkModulePermission } = require('../middleware/auth')
 
 const router = express.Router();
 
+function pctDisplay(percent) {
+  if (!Number.isFinite(percent) || percent <= 0) return 0;
+  return Math.round(percent * 10) / 10;
+}
+
 // @route   GET /api/stats/dashboard
 // @desc    Get optimized dashboard statistics
 // @access  Private
@@ -65,7 +70,8 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
       newAgencies,
       newProperties,
       newLeads,
-      newUsers
+      newUsers,
+      totalUsersAll
     ] = await Promise.all([
       // Total agencies (only for super_admin and staff)
       (req.user.role === 'super_admin' || req.user.role === 'staff')
@@ -186,7 +192,11 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
       User.countDocuments({
         ...((req.user.role !== 'super_admin' && req.user.role !== 'staff') ? { agency: agencyId } : {}),
         createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
-      })
+      }),
+      // All accounts for super/staff "Total Users"; agency/agent roles use agent count (matches UI "Total Agents")
+      (req.user.role === 'super_admin' || req.user.role === 'staff')
+        ? User.countDocuments({})
+        : Promise.resolve(null)
     ]);
 
     // Format inquiry stats
@@ -211,6 +221,10 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
     const agentRes = agentStats[0] || { total: 0, active: 0 };
     const staffRes = staffStats[0] || { total: 0, active: 0 };
     const transRes = transactionStats[0] || { totalTransactions: 0, completedTransactions: 0, totalRevenue: 0, totalCommission: 0 };
+    const totalUsers =
+      req.user.role === 'super_admin' || req.user.role === 'staff'
+        ? (typeof totalUsersAll === 'number' ? totalUsersAll : 0)
+        : agentRes.total;
 
     // Property stats by status
 
@@ -264,6 +278,7 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
       },
       totalLeads,
       activeLeads,
+      totalUsers,
       totalAgents: agentRes.total,
       activeAgents: agentRes.active,
       inactiveAgents: agentRes.total - agentRes.active,
@@ -354,7 +369,8 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       totalPropertyValue,
       recentProperties,
       recentLeads,
-      agentPerformance
+      agentPerformance,
+      totalAgenciesAll
     ] = await Promise.all([
       // Properties by status
       Property.aggregate([
@@ -527,7 +543,26 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
                 $filter: {
                   input: '$leads',
                   as: 'lead',
-                  cond: { $eq: ['$$lead.status', 'converted'] }
+                  cond: {
+                    $in: [
+                      '$$lead.status',
+                      ['booked', 'closed', 'converted']
+                    ]
+                  }
+                }
+              }
+            },
+            activeLeads: {
+              $size: {
+                $filter: {
+                  input: '$leads',
+                  as: 'lead',
+                  cond: {
+                    $in: [
+                      '$$lead.status',
+                      ['new', 'contacted', 'site_visit_scheduled', 'site_visit_completed', 'negotiation', 'site_visit']
+                    ]
+                  }
                 }
               }
             },
@@ -544,8 +579,13 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
           }
         },
         { $sort: { totalLeads: -1 } },
-        { $limit: 10 }
-      ])
+        { $limit: req.user.role === 'agency_admin' ? 500 : 10 }
+      ]),
+      (req.user.role === 'super_admin' || req.user.role === 'staff')
+        ? Agency.countDocuments({})
+        : req.user.role === 'agency_admin'
+          ? Promise.resolve(1)
+          : Promise.resolve(0)
     ]);
 
     // Format results
@@ -593,7 +633,7 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
         ]),
         Lead.aggregate([
           { $match: agencyFilterForList._id ? { agency: agencyFilterForList._id } : {} },
-          { $group: { _id: '$agency', totalLeads: { $sum: 1 }, convertedLeads: { $sum: { $cond: [{ $in: ['$status', ['booked', 'closed']] }, 1, 0] } } } }
+          { $group: { _id: '$agency', totalLeads: { $sum: 1 }, convertedLeads: { $sum: { $cond: [{ $in: ['$status', ['booked', 'closed', 'converted']] }, 1, 0] } } } }
         ])
       ]);
       const agentsMap = Object.fromEntries((agentsByAgency || []).map(x => [x._id?.toString(), x]));
@@ -612,7 +652,7 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
         if (hasNoAgents || hasNoLeads) healthStatus = 'poor';
         else if (totalLeads < 5 || totalAgents === 0) healthStatus = 'average';
         const healthLabel = healthStatus === 'good' ? 'Good' : healthStatus === 'average' ? 'Average' : 'Needs attention';
-        const conversionRate = totalLeads > 0 ? ((leads.convertedLeads / totalLeads) * 100).toFixed(1) : 0;
+        const conversionRate = totalLeads > 0 ? pctDisplay((leads.convertedLeads / totalLeads) * 100) : 0;
         return {
           id,
           name: agency.name || '',
@@ -630,7 +670,7 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
           activeProperties: props.activeProperties || 0,
           totalLeads,
           convertedLeads: leads.convertedLeads || 0,
-          conversionRate: Number(conversionRate),
+          conversionRate,
           totalPropertyValue: props.totalPropertyValue || 0,
           daysSinceActivity: null
         };
@@ -641,6 +681,7 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       totalUsers,
       totalProperties,
       totalLeads,
+      totalAgencies: totalAgenciesAll,
       userStats: {
         activeUsers,
         inactiveUsers: Math.max(totalUsers - activeUsers, 0)
@@ -658,7 +699,8 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       agentPerformance: agentPerformance.map(a => ({
         ...a,
         name: `${a.firstName || ''} ${a.lastName || ''}`.trim() || a.email,
-        conversionRate: a.totalLeads > 0 ? ((a.convertedLeads / a.totalLeads) * 100).toFixed(1) : 0
+        activeLeads: a.activeLeads ?? 0,
+        conversionRate: a.totalLeads > 0 ? pctDisplay((a.convertedLeads / a.totalLeads) * 100) : 0
       })),
       agencyAnalysis
     });

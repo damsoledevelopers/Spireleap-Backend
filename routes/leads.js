@@ -1,4 +1,5 @@
 const express = require('express');
+const crypto = require('crypto');
 const { body, validationResult, query } = require('express-validator');
 const mongoose = require('mongoose');
 const Lead = require('../models/Lead');
@@ -17,6 +18,12 @@ const { normalizePhoneToE164 } = require('../utils/phone');
 const router = express.Router();
 
 const activeStatuses = ['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation'];
+
+/** Percent 0–100 for API JSON: 0 stays numeric 0 (not "0.00"); otherwise up to one decimal */
+function pctDisplay(percent) {
+  if (!Number.isFinite(percent) || percent <= 0) return 0;
+  return Math.round(percent * 10) / 10;
+}
 
 // @route   GET /api/leads/field-options
 // @desc    Get dropdown options for lead creation fields
@@ -2232,8 +2239,9 @@ router.post('/:id/convert-to-client',
   checkModulePermission('users', 'create'),
   [
     body('password')
+      .optional({ values: 'falsy' })
       .isLength({ min: 6 })
-      .withMessage('Password must be at least 6 characters')
+      .withMessage('Password must be at least 6 characters when provided')
   ],
   async (req, res) => {
     try {
@@ -2289,7 +2297,10 @@ router.post('/:id/convert-to-client',
         return res.status(400).json({ message: 'User already exists with this email' });
       }
 
-      const password = String(req.body.password || '').trim();
+      let password = String(req.body.password || '').trim();
+      if (!password) {
+        password = crypto.randomBytes(24).toString('base64url');
+      }
 
       const userData = {
         firstName: decryptedContact.firstName || 'Client',
@@ -4156,8 +4167,11 @@ router.get('/analytics/dashboard-metrics', auth, checkModulePermission('leads', 
     const countsMap = {};
     stats.statusCounts.forEach(s => countsMap[s._id] = s.count);
 
-    const convertedLeadsSet = (countsMap['booked'] || 0) + (countsMap['closed'] || 0);
-    const conversionRate = totalLeads > 0 ? ((convertedLeadsSet / totalLeads) * 100).toFixed(2) : 0;
+    const convertedLeadsSet =
+      (countsMap['booked'] || 0) +
+      (countsMap['closed'] || 0) +
+      (countsMap['converted'] || 0);
+    const conversionRate = totalLeads > 0 ? pctDisplay((convertedLeadsSet / totalLeads) * 100) : 0;
 
     // Get New Leads Today & This Month (ignores query date filter but respects other filters)
     const baseFilterWithoutDates = { ...filter };
@@ -4226,7 +4240,7 @@ router.get('/analytics/dashboard-metrics', auth, checkModulePermission('leads', 
           completed: followUps.completed,
           pending: followUps.pending,
           completionRate: followUps.total > 0
-            ? ((followUps.completed / followUps.total) * 100).toFixed(1)
+            ? pctDisplay((followUps.completed / followUps.total) * 100)
             : 0
         }
       }
@@ -4313,7 +4327,9 @@ router.get('/analytics/advanced', auth, checkModulePermission('leads', 'view'), 
     const currentMetrics = {
       totalLeads: leads.length,
       newLeads: leads.filter(l => l.status === 'new').length,
-      convertedLeads: leads.filter(l => l.status === 'booked' || l.status === 'closed').length,
+      convertedLeads: leads.filter(l =>
+        l.status === 'booked' || l.status === 'closed' || l.status === 'converted'
+      ).length,
       totalRevenue: leads.reduce((sum, l) => {
         return sum + (l.booking?.bookingAmount || l.property?.price || 0);
       }, 0),
@@ -4327,7 +4343,9 @@ router.get('/analytics/advanced', auth, checkModulePermission('leads', 'view'), 
     const previousMetrics = {
       totalLeads: previousLeads.length,
       newLeads: previousLeads.filter(l => l.status === 'new').length,
-      convertedLeads: previousLeads.filter(l => l.status === 'booked' || l.status === 'closed').length,
+      convertedLeads: previousLeads.filter(l =>
+        l.status === 'booked' || l.status === 'closed' || l.status === 'converted'
+      ).length,
       totalRevenue: previousLeads.reduce((sum, l) => {
         return sum + (l.booking?.bookingAmount || l.property?.price || 0);
       }, 0),
@@ -4337,10 +4355,10 @@ router.get('/analytics/advanced', auth, checkModulePermission('leads', 'view'), 
 
     // Calculate conversion rates
     currentMetrics.conversionRate = currentMetrics.totalLeads > 0
-      ? (currentMetrics.convertedLeads / currentMetrics.totalLeads * 100)
+      ? pctDisplay((currentMetrics.convertedLeads / currentMetrics.totalLeads) * 100)
       : 0;
     previousMetrics.conversionRate = previousMetrics.totalLeads > 0
-      ? (previousMetrics.convertedLeads / previousMetrics.totalLeads * 100)
+      ? pctDisplay((previousMetrics.convertedLeads / previousMetrics.totalLeads) * 100)
       : 0;
 
     // Calculate average lead values
@@ -4362,7 +4380,7 @@ router.get('/analytics/advanced', auth, checkModulePermission('leads', 'view'), 
         };
       }
       currentMetrics.sourceBreakdown[source].total++;
-      if (lead.status === 'booked' || lead.status === 'closed') {
+      if (lead.status === 'booked' || lead.status === 'closed' || lead.status === 'converted') {
         currentMetrics.sourceBreakdown[source].converted++;
         currentMetrics.sourceBreakdown[source].revenue += (lead.booking?.bookingAmount || lead.property?.price || 0);
       }
@@ -4382,7 +4400,7 @@ router.get('/analytics/advanced', auth, checkModulePermission('leads', 'view'), 
           };
         }
         currentMetrics.agentPerformance[agentId].totalLeads++;
-        if (lead.status === 'booked' || lead.status === 'closed') {
+        if (lead.status === 'booked' || lead.status === 'closed' || lead.status === 'converted') {
           currentMetrics.agentPerformance[agentId].convertedLeads++;
           currentMetrics.agentPerformance[agentId].revenue += (lead.booking?.bookingAmount || lead.property?.price || 0);
         }
@@ -4393,20 +4411,20 @@ router.get('/analytics/advanced', auth, checkModulePermission('leads', 'view'), 
     Object.keys(currentMetrics.agentPerformance).forEach(agentId => {
       const agent = currentMetrics.agentPerformance[agentId];
       agent.conversionRate = agent.totalLeads > 0
-        ? (agent.convertedLeads / agent.totalLeads * 100)
+        ? pctDisplay((agent.convertedLeads / agent.totalLeads) * 100)
         : 0;
     });
 
     // Calculate trends (percentage change)
     const trends = {
       totalLeads: previousMetrics.totalLeads > 0
-        ? (((currentMetrics.totalLeads - previousMetrics.totalLeads) / previousMetrics.totalLeads) * 100).toFixed(2)
+        ? pctDisplay(((currentMetrics.totalLeads - previousMetrics.totalLeads) / previousMetrics.totalLeads) * 100)
         : currentMetrics.totalLeads > 0 ? 100 : 0,
       conversionRate: previousMetrics.conversionRate > 0
-        ? (((currentMetrics.conversionRate - previousMetrics.conversionRate) / previousMetrics.conversionRate) * 100).toFixed(2)
+        ? pctDisplay(((currentMetrics.conversionRate - previousMetrics.conversionRate) / previousMetrics.conversionRate) * 100)
         : currentMetrics.conversionRate > 0 ? 100 : 0,
       revenue: previousMetrics.totalRevenue > 0
-        ? (((currentMetrics.totalRevenue - previousMetrics.totalRevenue) / previousMetrics.totalRevenue) * 100).toFixed(2)
+        ? pctDisplay(((currentMetrics.totalRevenue - previousMetrics.totalRevenue) / previousMetrics.totalRevenue) * 100)
         : currentMetrics.totalRevenue > 0 ? 100 : 0
     };
 
@@ -4435,7 +4453,7 @@ router.get('/analytics/advanced', auth, checkModulePermission('leads', 'view'), 
         total: data.total,
         converted: data.converted,
         revenue: data.revenue,
-        conversionRate: data.total > 0 ? ((data.converted / data.total) * 100).toFixed(2) : 0
+        conversionRate: data.total > 0 ? pctDisplay((data.converted / data.total) * 100) : 0
       })).sort((a, b) => b.revenue - a.revenue),
       agentPerformance: Object.values(currentMetrics.agentPerformance)
         .sort((a, b) => b.revenue - a.revenue)
@@ -4498,7 +4516,7 @@ router.get('/analytics/campaign-roi', auth, checkModulePermission('leads', 'view
       campaignData[campaign].totalLeads++;
 
       // Check if converted (booked or closed)
-      if (lead.status === 'booked' || lead.status === 'closed') {
+      if (lead.status === 'booked' || lead.status === 'closed' || lead.status === 'converted') {
         campaignData[campaign].convertedLeads++;
 
         // Calculate revenue
@@ -4524,7 +4542,7 @@ router.get('/analytics/campaign-roi', auth, checkModulePermission('leads', 'view
     // Calculate metrics for each campaign
     const campaigns = Object.values(campaignData).map(campaign => {
       campaign.conversionRate = campaign.totalLeads > 0
-        ? ((campaign.convertedLeads / campaign.totalLeads) * 100).toFixed(2)
+        ? pctDisplay((campaign.convertedLeads / campaign.totalLeads) * 100)
         : 0;
       campaign.averageLeadValue = campaign.convertedLeads > 0
         ? (campaign.totalRevenue / campaign.convertedLeads).toFixed(2)
@@ -4533,14 +4551,16 @@ router.get('/analytics/campaign-roi', auth, checkModulePermission('leads', 'view
       // ROI calculation (assuming campaign cost is stored separately, for now using lead count as proxy)
       // In real implementation, you'd fetch campaign costs from a campaigns table
       campaign.estimatedROI = campaign.totalRevenue > 0
-        ? ((campaign.totalRevenue - (campaign.totalLeads * 100)) / (campaign.totalLeads * 100) * 100).toFixed(2)
+        ? pctDisplay(((campaign.totalRevenue - (campaign.totalLeads * 100)) / (campaign.totalLeads * 100)) * 100)
         : 0;
 
       return campaign;
     }).sort((a, b) => b.totalRevenue - a.totalRevenue);
 
     const totalLeads = leads.length;
-    const totalConverted = leads.filter(l => l.status === 'booked' || l.status === 'closed').length;
+    const totalConverted = leads.filter(l =>
+      l.status === 'booked' || l.status === 'closed' || l.status === 'converted'
+    ).length;
     const totalRevenue = campaigns.reduce((sum, c) => sum + parseFloat(c.totalRevenue), 0);
 
     res.json({
@@ -4550,7 +4570,7 @@ router.get('/analytics/campaign-roi', auth, checkModulePermission('leads', 'view
         totalLeads,
         totalConverted,
         totalRevenue: totalRevenue.toFixed(2),
-        overallConversionRate: totalLeads > 0 ? ((totalConverted / totalLeads) * 100).toFixed(2) : 0,
+        overallConversionRate: totalLeads > 0 ? pctDisplay((totalConverted / totalLeads) * 100) : 0,
         averageRevenuePerConversion: totalConverted > 0 ? (totalRevenue / totalConverted).toFixed(2) : 0
       }
     });
@@ -4618,7 +4638,7 @@ router.get('/analytics/lost-reasons', auth, checkModulePermission('leads', 'view
     const total = lostLeads.length;
     const analysis = Object.values(reasonAnalysis).map(item => ({
       ...item,
-      percentage: total > 0 ? ((item.count / total) * 100).toFixed(2) : 0
+      percentage: total > 0 ? pctDisplay((item.count / total) * 100) : 0
     })).sort((a, b) => b.count - a.count);
 
     res.json({

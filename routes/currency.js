@@ -5,6 +5,10 @@ const { auth, checkModulePermission } = require('../middleware/auth');
 
 const router = express.Router();
 
+function escapeRegExp(string) {
+  return String(string).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 // @route   POST /api/currency
 // @desc    Add currency
 // @access  Private
@@ -42,6 +46,14 @@ router.post(
         aedRate: rate,
         status: req.body.status !== undefined ? Boolean(req.body.status) : true,
       };
+
+      const dupCountry = await Currency.findOne({
+        isDeleted: false,
+        countryName: new RegExp(`^${escapeRegExp(String(req.body.countryName).trim())}$`, 'i')
+      });
+      if (dupCountry) {
+        return res.status(400).json({ message: 'A currency is already configured for this country' });
+      }
 
       const existing = await Currency.findOne({ currencyCode: payload.currencyCode, isDeleted: false });
       if (existing) {
