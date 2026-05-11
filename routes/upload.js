@@ -12,6 +12,15 @@ const emailService = require('../services/emailService');
 
 const router = express.Router();
 
+/**
+ * Image storage
+ * - Cloudinary (env: CLOUDINARY_CLOUD_NAME, CLOUDINARY_API_KEY, CLOUDINARY_API_SECRET; optional folder vars):
+ *   POST/DELETE /cloudinary/profile-image — super_admin profile avatar only (memory → cloudinaryService).
+ * - Local disk under uploads/ (served via app.use('/uploads', ...) in index.js):
+ *   POST / (query ?folder=…), /property-image, /property-images, /profile-image (non–super-admin),
+ *   /property-documents, /lead-documents; DELETE /:filename for disk files only.
+ */
+
 // Generic upload endpoint for different folders
 // Supports query parameter: ?folder=agencies or body field: folder=agencies
 router.post('/', auth, (req, res) => {
