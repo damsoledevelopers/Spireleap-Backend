@@ -46,8 +46,13 @@ router.get('/dropdown-options', optionalAuth, async (req, res) => {
     res.json({
       paginationLimits: [10, 20, 50, 100],
       currencies: currencyCodes.length > 0 ? currencyCodes : ['AED', 'USD', 'INR'],
-      timezones: ['UTC', 'EST', 'PST', 'GMT'],
-      languages: ['en', 'es', 'fr', 'de'],
+      timezones: [
+        '(UTC) Coordinated Universal Time',
+        '(EST) Eastern Standard Time',
+        '(PST) Pacific Standard Time',
+        '(GMT) Greenwich Mean Time'
+      ],
+      languages: ['English', 'Spanish', 'French', 'German'],
       logLevels: ['debug', 'info', 'warn', 'error'],
       backupFrequencies: ['hourly', 'daily', 'weekly', 'monthly'],
       budgetCurrencies: ['USD', 'EUR', 'GBP'],

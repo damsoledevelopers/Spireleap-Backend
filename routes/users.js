@@ -59,7 +59,8 @@ router.post('/', [
       address,
       role = 'user',
       agency,
-      isActive = true
+      isActive = true,
+      staffInfo
     } = req.body;
 
     // Agency Admin/Agent/Staff restrictions
@@ -96,7 +97,8 @@ router.post('/', [
       address,
       role,
       agency: ['agency_admin', 'agent', 'staff'].includes(req.user.role) ? req.user.agency : (agency || null),
-      isActive
+      isActive,
+      staffInfo
     };
 
     const user = new User(userData);

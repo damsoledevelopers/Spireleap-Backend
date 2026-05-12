@@ -370,7 +370,8 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       recentProperties,
       recentLeads,
       agentPerformance,
-      totalAgenciesAll
+      totalAgenciesAll,
+      convertedClientsCount
     ] = await Promise.all([
       // Properties by status
       Property.aggregate([
@@ -585,7 +586,13 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
         ? Agency.countDocuments({})
         : req.user.role === 'agency_admin'
           ? Promise.resolve(1)
-          : Promise.resolve(0)
+          : Promise.resolve(0),
+
+      // Converted clients count (lead converted to client removes lead row)
+      User.countDocuments({
+        ...userFilter,
+        role: 'user'
+      })
     ]);
 
     // Format results
@@ -614,6 +621,12 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
         link: `/admin/leads/${l._id}`
       }))
     ].sort((a, b) => new Date(b.time) - new Date(a.time));
+
+    const convertedLeadsFromStatuses =
+      (formatStats(leadsByStatus).booked || 0) +
+      (formatStats(leadsByStatus).closed || 0) +
+      (formatStats(leadsByStatus).converted || 0);
+    const convertedLeads = convertedLeadsFromStatuses + (Number(convertedClientsCount) || 0);
 
     // Agency analysis (super_admin and agency_admin only)
     let agencyAnalysis = [];
@@ -653,13 +666,18 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
         else if (totalLeads < 5 || totalAgents === 0) healthStatus = 'average';
         const healthLabel = healthStatus === 'good' ? 'Good' : healthStatus === 'average' ? 'Average' : 'Needs attention';
         const conversionRate = totalLeads > 0 ? pctDisplay((leads.convertedLeads / totalLeads) * 100) : 0;
+        const isAgencyActive =
+          typeof agency.isActive === 'boolean'
+            ? agency.isActive
+            : (agency.status ? String(agency.status).toLowerCase() === 'active' : true);
+
         return {
           id,
           name: agency.name || '',
           email: agency.contact?.email || '',
           phone: agency.contact?.phone || '',
           logo: agency.logo || null,
-          isActive: true,
+          isActive: isAgencyActive,
           hasNoAgents,
           hasNoLeads,
           healthStatus,
@@ -681,6 +699,8 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       totalUsers,
       totalProperties,
       totalLeads,
+      totalLeadsWithConverted: totalLeads + convertedLeads,
+      convertedLeads,
       totalAgencies: totalAgenciesAll,
       userStats: {
         activeUsers,

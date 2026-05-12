@@ -1,20 +1,13 @@
 const mongoose = require('mongoose');
+const { isPostalDigitsOrEmpty, POSTAL_DIGITS_VALIDATION_MESSAGE } = require('../utils/postalCode');
 
 const ALPHA_TEXT_REGEX = /^[A-Za-z\s.'-]+$/;
-const ZIP_REGEX = /^(\d{5}|\d{9})$/;
 
 const isAlphaTextOrEmpty = (v) => {
   if (v === null || v === undefined) return true;
   const s = String(v).trim();
   if (!s) return true;
   return ALPHA_TEXT_REGEX.test(s);
-};
-
-const isZipOrEmpty = (v) => {
-  if (v === null || v === undefined) return true;
-  const s = String(v).trim();
-  if (!s) return true;
-  return ZIP_REGEX.test(s);
 };
 
 const propertySchema = new mongoose.Schema({
@@ -90,7 +83,7 @@ const propertySchema = new mongoose.Schema({
     zipCode: {
       type: String,
       trim: true,
-      validate: { validator: isZipOrEmpty, message: 'Zip code must be 5 digits or 9 digits (ZIP+4)' }
+      validate: { validator: isPostalDigitsOrEmpty, message: POSTAL_DIGITS_VALIDATION_MESSAGE }
     },
     coordinates: {
       lat: {
