@@ -1365,6 +1365,13 @@ router.put('/:id', [
       req.body.status = 'pending';
     }
 
+    // Normalize optional reference fields to prevent CastError on empty strings.
+    if (req.body.agency === '' || req.body.agency == null) delete req.body.agency;
+    if (req.body.agent === '' || req.body.agent == null) delete req.body.agent;
+    if (req.body.category === '' || req.body.category == null) delete req.body.category;
+    if (!Array.isArray(req.body.amenities)) req.body.amenities = [];
+    req.body.tags = Array.isArray(req.body.tags) ? req.body.tags.filter(Boolean) : [];
+
     // Capture old state for status change notifications
     const oldStatus = property.status;
     const newStatus = req.body.status;

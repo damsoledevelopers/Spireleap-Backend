@@ -55,6 +55,11 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
       transactionFilter.agent = userId;
     }
 
+    const userScopeMatch =
+      req.user.role !== 'super_admin' && req.user.role !== 'staff'
+        ? { agency: agencyId }
+        : {};
+
     // Use aggregation for efficient counting
     const [
       totalAgencies,
@@ -71,7 +76,9 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
       newProperties,
       newLeads,
       newUsers,
-      totalUsersAll
+      totalUsersAll,
+      usersByRoleAgg,
+      newUsersByRoleAgg
     ] = await Promise.all([
       // Total agencies (only for super_admin and staff)
       (req.user.role === 'super_admin' || req.user.role === 'staff')
@@ -190,13 +197,36 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
       Property.countDocuments({ ...propertyFilter, createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
       Lead.countDocuments({ ...leadFilter, createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) } }),
       User.countDocuments({
-        ...((req.user.role !== 'super_admin' && req.user.role !== 'staff') ? { agency: agencyId } : {}),
+        ...userScopeMatch,
         createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
       }),
       // All accounts for super/staff "Total Users"; agency/agent roles use agent count (matches UI "Total Agents")
       (req.user.role === 'super_admin' || req.user.role === 'staff')
         ? User.countDocuments({})
-        : Promise.resolve(null)
+        : Promise.resolve(null),
+      User.aggregate([
+        { $match: userScopeMatch },
+        {
+          $group: {
+            _id: '$role',
+            count: { $sum: 1 }
+          }
+        }
+      ]),
+      User.aggregate([
+        {
+          $match: {
+            ...userScopeMatch,
+            createdAt: { $gte: new Date(Date.now() - 24 * 60 * 60 * 1000) }
+          }
+        },
+        {
+          $group: {
+            _id: '$role',
+            count: { $sum: 1 }
+          }
+        }
+      ])
     ]);
 
     // Format inquiry stats
@@ -221,6 +251,40 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
     const agentRes = agentStats[0] || { total: 0, active: 0 };
     const staffRes = staffStats[0] || { total: 0, active: 0 };
     const transRes = transactionStats[0] || { totalTransactions: 0, completedTransactions: 0, totalRevenue: 0, totalCommission: 0 };
+    const roleBreakdown = {
+      super_admin: 0,
+      agency_admin: 0,
+      agent: 0,
+      staff: 0,
+      user: 0
+    };
+    const newRoleBreakdown = {
+      super_admin: 0,
+      agency_admin: 0,
+      agent: 0,
+      staff: 0,
+      user: 0
+    };
+    (usersByRoleAgg || []).forEach((entry) => {
+      const role = entry?._id;
+      if (Object.prototype.hasOwnProperty.call(roleBreakdown, role)) {
+        roleBreakdown[role] = Number(entry.count || 0);
+      }
+    });
+    (newUsersByRoleAgg || []).forEach((entry) => {
+      const role = entry?._id;
+      if (Object.prototype.hasOwnProperty.call(newRoleBreakdown, role)) {
+        newRoleBreakdown[role] = Number(entry.count || 0);
+      }
+    });
+    const managedTotal =
+      roleBreakdown.agency_admin + roleBreakdown.agent + roleBreakdown.staff + roleBreakdown.user;
+    const newManagedTotal =
+      newRoleBreakdown.agency_admin + newRoleBreakdown.agent + newRoleBreakdown.staff + newRoleBreakdown.user;
+    // Dashboard "Total Users" card formula requested:
+    // Agencies + Agents + Staff + Clients (exclude super_admin)
+    const totalClients = roleBreakdown.user;
+    const totalUsersCard = Number(totalAgencies || 0) + Number(agentRes.total || 0) + Number(staffRes.total || 0) + Number(totalClients || 0);
     const totalUsers =
       req.user.role === 'super_admin' || req.user.role === 'staff'
         ? (typeof totalUsersAll === 'number' ? totalUsersAll : 0)
@@ -279,6 +343,19 @@ router.get('/dashboard', auth, checkModulePermission('leads', 'view'), async (re
       totalLeads,
       activeLeads,
       totalUsers,
+      userRoleBreakdown: {
+        ...roleBreakdown,
+        managedTotal,
+        newManagedTotal,
+        newByRole: newRoleBreakdown
+      },
+      totalUsersCard,
+      totalUsersCardBreakdown: {
+        agencies: Number(totalAgencies || 0),
+        agents: Number(agentRes.total || 0),
+        staff: Number(staffRes.total || 0),
+        clients: Number(totalClients || 0)
+      },
       totalAgents: agentRes.total,
       activeAgents: agentRes.active,
       inactiveAgents: agentRes.total - agentRes.active,
