@@ -17,13 +17,22 @@ const router = express.Router();
 router.get('/dropdown-options', optionalAuth, async (req, res) => {
   try {
     const currencyDocs = await Currency.find({ isDeleted: false, status: true })
-      .select('currencyCode')
+      .select('currencyCode aedRate')
       .sort({ currencyCode: 1 })
       .lean();
 
     const currencyCodes = (currencyDocs || [])
       .map((d) => String(d.currencyCode || '').trim().toUpperCase())
       .filter(Boolean);
+
+    const currencyRates = (currencyDocs || []).reduce((acc, d) => {
+      const code = String(d.currencyCode || '').trim().toUpperCase();
+      const rate = Number(d.aedRate);
+      if (code && Number.isFinite(rate) && rate > 0) {
+        acc[code] = rate;
+      }
+      return acc;
+    }, { AED: 1 });
 
     const locationDocs = await Location.find({ isDeleted: false, isActive: true })
       .select('country state city')
@@ -46,6 +55,7 @@ router.get('/dropdown-options', optionalAuth, async (req, res) => {
     res.json({
       paginationLimits: [10, 20, 50, 100],
       currencies: currencyCodes.length > 0 ? currencyCodes : ['AED', 'USD', 'INR'],
+      currencyRates,
       timezones: [
         '(UTC) Coordinated Universal Time',
         '(EST) Eastern Standard Time',

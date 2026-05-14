@@ -1,7 +1,9 @@
 const express = require('express');
 const jwt = require('jsonwebtoken');
+const crypto = require('crypto');
 const { body, validationResult } = require('express-validator');
 const User = require('../models/User');
+const Settings = require('../models/Settings');
 const RolePermission = require('../models/RolePermission');
 const AgencyPermission = require('../models/AgencyPermission');
 const UserPermission = require('../models/UserPermission');
@@ -49,6 +51,80 @@ const generateToken = (userId, { persistent = false } = {}) => {
     expiresIn,
   })
 }
+
+const OTP_TTL_MINUTES = 10;
+
+const generateOtp = () => String(Math.floor(100000 + Math.random() * 900000));
+
+const hashOtp = (otp) => {
+  const secret = process.env.JWT_SECRET || 'fallback_secret';
+  return crypto.createHash('sha256').update(`${String(otp)}.${secret}`).digest('hex');
+};
+
+const maskEmail = (email) => {
+  const safeEmail = String(email || '').trim();
+  const [name, domain] = safeEmail.split('@');
+  if (!name || !domain) return safeEmail;
+  if (name.length <= 2) return `${name[0] || ''}***@${domain}`;
+  return `${name.slice(0, 2)}***${name.slice(-1)}@${domain}`;
+};
+
+const generateOtpChallengeToken = ({ userId, otpHash, type, rememberMe = false, expiresIn = `${OTP_TTL_MINUTES}m` }) => {
+  return jwt.sign(
+    { userId, otpHash, type, rememberMe: !!rememberMe },
+    process.env.JWT_SECRET || 'fallback_secret',
+    { expiresIn }
+  );
+};
+
+const isTwoFactorRequired = async () => {
+  try {
+    const setting = await Settings.findOne({ key: 'security.requireTwoFactor' }).lean();
+    if (!setting) return false;
+    if (typeof setting.value === 'boolean') return setting.value;
+    if (typeof setting.value === 'string') return setting.value.toLowerCase() === 'true';
+    return Boolean(setting.value);
+  } catch {
+    return false;
+  }
+};
+
+const sendOtpEmail = async (user, otp, reason = 'login') => {
+  const subject =
+    reason === 'password_reset'
+      ? 'Your Password Reset OTP - SPIRELEAP'
+      : 'Your Login OTP - SPIRELEAP';
+  const text =
+    reason === 'password_reset'
+      ? `Your password reset OTP is ${otp}. It will expire in ${OTP_TTL_MINUTES} minutes.`
+      : `Your login OTP is ${otp}. It will expire in ${OTP_TTL_MINUTES} minutes.`;
+  const html = `
+    <div style="font-family: Arial, sans-serif; line-height: 1.5;">
+      <h2>${reason === 'password_reset' ? 'Password Reset OTP' : 'Login OTP'}</h2>
+      <p>Hello ${user.firstName || 'User'},</p>
+      <p>Your OTP is:</p>
+      <p style="font-size: 24px; font-weight: bold; letter-spacing: 4px;">${otp}</p>
+      <p>This OTP will expire in ${OTP_TTL_MINUTES} minutes.</p>
+      <p>If you did not request this, you can ignore this email.</p>
+    </div>
+  `;
+
+  if (typeof emailService.ensureInitialized === 'function') {
+    await emailService.ensureInitialized();
+  }
+  if (!emailService.transporter) {
+    throw new Error('Email service is not initialized');
+  }
+  const fromName = emailService.fromName || 'SPIRELEAP Real Estate';
+  const fromEmail = emailService.fromEmail || process.env.FROM_EMAIL || process.env.SMTP_USER;
+  await emailService.transporter.sendMail({
+    from: `"${fromName}" <${fromEmail}>`,
+    to: user.email,
+    subject,
+    text,
+    html
+  });
+};
 
 // @route   POST /api/auth/register
 // @desc    Register a new user
@@ -293,6 +369,30 @@ router.post('/login', [
       });
     }
 
+    const requireTwoFactor = await isTwoFactorRequired();
+    if (requireTwoFactor) {
+      const otp = generateOtp();
+      const otpHash = hashOtp(otp);
+      const otpExpiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
+      const challengeToken = generateOtpChallengeToken({
+        userId: user._id.toString(),
+        otpHash,
+        type: 'login_otp',
+        rememberMe: !!rememberMe
+      });
+
+      await sendOtpEmail(user, otp, 'login');
+
+      return res.json({
+        requiresOtp: true,
+        otpType: 'login',
+        challengeToken,
+        otpExpiresIn: OTP_TTL_MINUTES * 60,
+        maskedEmail: maskEmail(user.email),
+        message: 'OTP sent to your email'
+      });
+    }
+
     // Update last login (Non-blocking)
     User.updateOne({ _id: user._id }, { $set: { lastLogin: new Date() } }).catch(err => console.error('Last login update error:', err));
 
@@ -320,7 +420,8 @@ router.post('/login', [
         agency: user.agency,
         lastLogin: user.lastLogin,
         isActive: user.isActive
-      }
+      },
+      requiresOtp: false
     });
   } catch (error) {
     console.error('Login error:', error);
@@ -379,6 +480,112 @@ router.post('/refresh-token', async (req, res) => {
   }
 });
 
+// @route   POST /api/auth/verify-login-otp
+// @desc    Verify login OTP and issue auth token
+// @access  Public
+router.post('/verify-login-otp', [
+  body('challengeToken').notEmpty().withMessage('Challenge token is required'),
+  body('otp').isLength({ min: 4, max: 8 }).withMessage('Valid OTP is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { challengeToken, otp } = req.body;
+    let decoded;
+    try {
+      decoded = jwt.verify(challengeToken, process.env.JWT_SECRET || 'fallback_secret');
+    } catch {
+      return res.status(400).json({ message: 'OTP session expired. Please login again.' });
+    }
+
+    if (decoded.type !== 'login_otp') {
+      return res.status(400).json({ message: 'Invalid OTP session' });
+    }
+
+    const user = await User.findById(decoded.userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (!user.isActive) return res.status(401).json({ message: 'Account is inactive' });
+
+    const incomingHash = hashOtp(String(otp).trim());
+    if (incomingHash !== decoded.otpHash) {
+      return res.status(400).json({ message: 'Invalid OTP' });
+    }
+
+    User.updateOne({ _id: user._id }, { $set: { lastLogin: new Date() } }).catch(() => {});
+    const token = generateToken(user._id, { persistent: !!decoded.rememberMe });
+
+    return res.json({
+      message: 'Login successful',
+      token,
+      requiresOtp: false,
+      user: {
+        id: user._id,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        email: user.email,
+        role: user.role,
+        agency: user.agency,
+        lastLogin: user.lastLogin,
+        isActive: user.isActive
+      }
+    });
+  } catch (error) {
+    console.error('Verify login OTP error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   POST /api/auth/resend-login-otp
+// @desc    Resend login OTP with existing challenge token
+// @access  Public
+router.post('/resend-login-otp', [
+  body('challengeToken').notEmpty().withMessage('Challenge token is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    let decoded;
+    try {
+      decoded = jwt.verify(req.body.challengeToken, process.env.JWT_SECRET || 'fallback_secret');
+    } catch {
+      return res.status(400).json({ message: 'OTP session expired. Please login again.' });
+    }
+
+    if (decoded.type !== 'login_otp') {
+      return res.status(400).json({ message: 'Invalid OTP session' });
+    }
+
+    const user = await User.findById(decoded.userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (!user.isActive) return res.status(401).json({ message: 'Account is inactive' });
+
+    const otp = generateOtp();
+    const otpHash = hashOtp(otp);
+    const challengeToken = generateOtpChallengeToken({
+      userId: user._id.toString(),
+      otpHash,
+      type: 'login_otp',
+      rememberMe: !!decoded.rememberMe
+    });
+    await sendOtpEmail(user, otp, 'login');
+
+    return res.json({
+      message: 'OTP resent successfully',
+      challengeToken,
+      otpExpiresIn: OTP_TTL_MINUTES * 60,
+      maskedEmail: maskEmail(user.email)
+    });
+  } catch (error) {
+    console.error('Resend login OTP error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // @route   GET /api/auth/me
 // @desc    Get current user and effective permissions (for hiding denied modules on frontend)
 // @access  Private
@@ -432,37 +639,137 @@ router.post('/forgot-password', [
     }
 
     const { email } = req.body;
-    const user = await User.findOne({ email });
+    const normalizedEmail = String(email || '').trim().toLowerCase();
+    const user = await User.findOne({ email: normalizedEmail });
 
+    // Generic response for security
     if (!user) {
-      return res.status(404).json({ message: 'User not found' });
+      return res.json({ message: 'If the account exists, OTP has been sent.' });
     }
 
-    // Generate reset token
-    const resetToken = jwt.sign(
-      { userId: user._id, type: 'password_reset' },
-      process.env.JWT_SECRET || 'fallback_secret',
-      { expiresIn: '1h' }
-    );
+    const otp = generateOtp();
+    const otpHash = hashOtp(otp);
+    const otpExpiresAt = new Date(Date.now() + OTP_TTL_MINUTES * 60 * 1000);
+    const challengeToken = generateOtpChallengeToken({
+      userId: user._id.toString(),
+      otpHash,
+      type: 'password_reset_otp',
+      expiresIn: `${OTP_TTL_MINUTES}m`
+    });
 
-    // Send password reset email
-    try {
-      await emailService.sendPasswordResetEmail(user, resetToken);
-      res.json({
-        message: 'Password reset email sent successfully'
-      });
-    } catch (emailError) {
-      console.error('Failed to send password reset email:', emailError);
-      res.status(500).json({ message: 'Failed to send password reset email' });
-    }
+    await sendOtpEmail(user, otp, 'password_reset');
+    res.json({
+      message: 'OTP sent to your email',
+      challengeToken,
+      otpExpiresIn: OTP_TTL_MINUTES * 60,
+      maskedEmail: maskEmail(user.email)
+    });
   } catch (error) {
     console.error('Forgot password error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
 
+// @route   POST /api/auth/verify-reset-otp
+// @desc    Verify reset OTP and issue reset token
+// @access  Public
+router.post('/verify-reset-otp', [
+  body('challengeToken').notEmpty().withMessage('Challenge token is required'),
+  body('otp').isLength({ min: 4, max: 8 }).withMessage('Valid OTP is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const { challengeToken, otp } = req.body;
+    let decoded;
+    try {
+      decoded = jwt.verify(challengeToken, process.env.JWT_SECRET || 'fallback_secret');
+    } catch {
+      return res.status(400).json({ message: 'OTP expired. Please request a new OTP.' });
+    }
+
+    if (decoded.type !== 'password_reset_otp') {
+      return res.status(400).json({ message: 'Invalid OTP session' });
+    }
+
+    const user = await User.findById(decoded.userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (!user.isActive) return res.status(401).json({ message: 'Account is inactive' });
+
+    const incomingHash = hashOtp(String(otp).trim());
+    if (incomingHash !== decoded.otpHash) {
+      return res.status(400).json({ message: 'Invalid OTP' });
+    }
+
+    const resetToken = jwt.sign(
+      { userId: user._id, type: 'password_reset_verified' },
+      process.env.JWT_SECRET || 'fallback_secret',
+      { expiresIn: '15m' }
+    );
+
+    return res.json({
+      message: 'OTP verified',
+      resetToken
+    });
+  } catch (error) {
+    console.error('Verify reset OTP error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   POST /api/auth/resend-reset-otp
+// @desc    Resend forgot password OTP
+// @access  Public
+router.post('/resend-reset-otp', [
+  body('challengeToken').notEmpty().withMessage('Challenge token is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    let decoded;
+    try {
+      decoded = jwt.verify(req.body.challengeToken, process.env.JWT_SECRET || 'fallback_secret');
+    } catch {
+      return res.status(400).json({ message: 'OTP session expired. Please request a new OTP.' });
+    }
+
+    if (decoded.type !== 'password_reset_otp') {
+      return res.status(400).json({ message: 'Invalid OTP session' });
+    }
+
+    const user = await User.findById(decoded.userId);
+    if (!user) return res.status(404).json({ message: 'User not found' });
+    if (!user.isActive) return res.status(401).json({ message: 'Account is inactive' });
+
+    const otp = generateOtp();
+    const otpHash = hashOtp(otp);
+    const challengeToken = generateOtpChallengeToken({
+      userId: user._id.toString(),
+      otpHash,
+      type: 'password_reset_otp',
+      expiresIn: `${OTP_TTL_MINUTES}m`
+    });
+    await sendOtpEmail(user, otp, 'password_reset');
+
+    return res.json({
+      message: 'OTP resent successfully',
+      challengeToken,
+      otpExpiresIn: OTP_TTL_MINUTES * 60,
+      maskedEmail: maskEmail(user.email)
+    });
+  } catch (error) {
+    console.error('Resend reset OTP error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // @route   POST /api/auth/reset-password
-// @desc    Reset password with token
+// @desc    Reset password with verified reset token
 // @access  Public
 router.post('/reset-password', [
   body('token').notEmpty().withMessage('Reset token is required'),
@@ -478,7 +785,7 @@ router.post('/reset-password', [
 
     // Verify token
     const decoded = jwt.verify(token, process.env.JWT_SECRET || 'fallback_secret');
-    if (decoded.type !== 'password_reset') {
+    if (decoded.type !== 'password_reset_verified') {
       return res.status(400).json({ message: 'Invalid token' });
     }
 

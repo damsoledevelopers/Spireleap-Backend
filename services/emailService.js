@@ -81,7 +81,8 @@ class EmailService {
       }
 
       this.smtpUser = safeSmtpUser;
-      this.fromEmail = fromEmail || safeSmtpUser;
+      // Force sender to authenticated SMTP mailbox to avoid Zoho relay rejection (553)
+      this.fromEmail = safeSmtpUser;
       this.fromName = fromName || 'SPIRELEAP Real Estate';
 
       this.transporter = nodemailer.createTransport({
@@ -99,17 +100,20 @@ class EmailService {
         // Connection pool options
         pool: true,               // Use connection pooling
         maxConnections: 5,        // Maximum number of connections
-        maxMessages: 100,         // Maximum messages per connection
-        // Retry options
-        retry: {
-          attempts: 3,            // Retry 3 times
-          delay: 2000             // Wait 2 seconds between retries
-        },
-        // TLS options for better compatibility
-        tls: {
-          rejectUnauthorized: false // Accept self-signed certificates if needed
-        }
+        maxMessages: 100          // Maximum messages per connection
       });
+
+      // Force authorized sender for all sendMail calls.
+      const originalSendMail = this.transporter.sendMail.bind(this.transporter);
+      this.transporter.sendMail = async (mailOptions = {}) => {
+        const forcedFrom = `"${this.fromName}" <${this.smtpUser}>`;
+        const normalizedMailOptions = {
+          ...mailOptions,
+          from: forcedFrom
+        };
+
+        return originalSendMail(normalizedMailOptions);
+      };
 
       // Verify connection with timeout handling
       console.log('EmailService: Verifying SMTP connection...');
@@ -557,55 +561,8 @@ SPIRELEAP Real Estate Team
   }
 
   async sendLoginNotificationEmail(user) {
-    await this.ensureInitialized();
-    try {
-      // Check if login alerts are enabled in settings
-      const alertSetting = await Settings.findOne({ key: 'notifications.loginAlerts' });
-      const areAlertsEnabled = alertSetting ? alertSetting.value : true; // Default to true if not set
-
-      if (!areAlertsEnabled) {
-        console.log('EmailService: Login alerts are disabled in settings, skipping email for:', user.email);
-        return { message: 'Alerts disabled' };
-      }
-
-      console.log('EmailService: sendLoginNotificationEmail called for:', user.email);
-
-      const now = new Date();
-      const loginTime = now.toLocaleString('en-US', {
-        dateStyle: 'full',
-        timeStyle: 'long'
-      });
-
-      const variables = {
-        firstName: user.firstName,
-        lastName: user.lastName,
-        loginTime: loginTime,
-        ipAddress: '', // Can be passed if available
-        device: '' // Can be passed if available
-      };
-
-      const { html, text, subject } = await this.getTemplate('login-notification', variables, () => ({
-        html: this.generateLoginNotificationHTML(user, loginTime),
-        text: this.generateLoginNotificationText(user, loginTime),
-        subject: 'New Login to Your SPIRELEAP Account'
-      }));
-
-      const mailOptions = {
-        from: `"${this.fromName}" <${this.fromEmail || this.smtpUser}>`,
-        to: user.email,
-        subject,
-        html,
-        text
-      };
-
-      console.log('EmailService: Sending login notification to:', user.email);
-      const result = await this.transporter.sendMail(mailOptions);
-      console.log('EmailService: ✓ Login notification sent successfully! MessageId:', result.messageId);
-      return result;
-    } catch (error) {
-      console.error('EmailService: ✗ Error sending login notification:', error.message);
-      throw error;
-    }
+    console.log('EmailService: Login notification email disabled, skipping for:', user?.email);
+    return { message: 'Login notification email disabled' };
   }
 
   generateLoginNotificationHTML(user, loginTime) {
@@ -3338,56 +3295,13 @@ ${agency?.name || 'SPIRELEAP'} Team
   }
 
   async sendPasswordChangeConfirmation(user) {
-    await this.ensureInitialized();
-    try {
-      const mailOptions = {
-        from: `"${this.fromName}" <${this.fromEmail}>`,
-        to: user.email,
-        subject: 'Security Alert: Your Password Was Changed',
-        html: `
-          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-top: 4px solid #d32f2f; border-radius: 5px;">
-            <h2 style="color: #d32f2f;">Security Alert</h2>
-            <p>Dear ${user.firstName},</p>
-            <p>This is a confirmation that the password for your SPIRELEAP CRM account was recently changed.</p>
-            <p>If you made this change, you can safely ignore this email.</p>
-            <p><strong>If you did NOT change your password</strong>, please contact your administrator immediately or use the "Forgot Password" link on the login page to secure your account.</p>
-            <hr style="border: none; border-top: 1px solid #eee; margin: 20px 0;">
-            <p style="font-size: 12px; color: #666;">This is an automated security notification. Please do not reply to this email.</p>
-          </div>
-        `,
-        text: `Security Alert: Your password was recently changed. If you did not make this change, please contact your administrator immediately.`
-      };
-
-      const result = await this.transporter.sendMail(mailOptions);
-      return result;
-    } catch (error) {
-      console.error('Error sending password change confirmation:', error);
-    }
+    console.log('EmailService: Password change confirmation email disabled, skipping for:', user?.email);
+    return { message: 'Password change confirmation email disabled' };
   }
 
   async sendProfileUpdateNotification(user) {
-    await this.ensureInitialized();
-    try {
-      const mailOptions = {
-        from: `"${this.fromName}" <${this.fromEmail}>`,
-        to: user.email,
-        subject: 'Profile Information Updated',
-        html: `
-          <div style="font-family: Arial, sans-serif; line-height: 1.6; color: #333; max-width: 600px; margin: 0 auto; padding: 20px; border: 1px solid #ddd; border-top: 4px solid #2c5aa0; border-radius: 5px;">
-            <h2 style="color: #2c5aa0;">Profile Updated</h2>
-            <p>Dear ${user.firstName},</p>
-            <p>Your profile information on SPIRELEAP CRM has been successfully updated.</p>
-            <p>If you did not perform this action, please review your account settings or contact an administrator.</p>
-            <p>Best regards,<br>SPIRELEAP team</p>
-          </div>
-        `,
-        text: `Your profile information on SPIRELEAP CRM has been updated.`
-      };
-
-      await this.transporter.sendMail(mailOptions);
-    } catch (error) {
-      console.error('Error sending profile update notification:', error);
-    }
+    console.log('EmailService: Profile update notification email disabled, skipping for:', user?.email);
+    return { message: 'Profile update notification email disabled' };
   }
 
   async sendRoleChangeNotification(user, oldRole, newRole) {
