@@ -126,6 +126,16 @@ const sendOtpEmail = async (user, otp, reason = 'login') => {
   });
 };
 
+const logOtpForLocalDev = ({ user, otp, reason = 'login' }) => {
+  const shouldLog = process.env.NODE_ENV !== 'production' || process.env.LOG_OTP_IN_TERMINAL === 'true';
+  if (!shouldLog) return;
+
+  const role = user?.role || 'unknown';
+  const email = user?.email || 'unknown-email';
+  const contextLabel = reason === 'password_reset' ? 'PASSWORD_RESET' : 'LOGIN';
+  console.log(`[OTP][${contextLabel}] role=${role} email=${email} otp=${otp}`);
+};
+
 // @route   POST /api/auth/register
 // @desc    Register a new user
 // @access  Public
@@ -382,6 +392,7 @@ router.post('/login', [
       });
 
       await sendOtpEmail(user, otp, 'login');
+      logOtpForLocalDev({ user, otp, reason: 'login' });
 
       return res.json({
         requiresOtp: true,
@@ -573,6 +584,7 @@ router.post('/resend-login-otp', [
       rememberMe: !!decoded.rememberMe
     });
     await sendOtpEmail(user, otp, 'login');
+    logOtpForLocalDev({ user, otp, reason: 'login' });
 
     return res.json({
       message: 'OTP resent successfully',

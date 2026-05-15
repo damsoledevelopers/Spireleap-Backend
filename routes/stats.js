@@ -429,6 +429,45 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       userFilter.agency = req.user.agency;
     }
 
+    // Numeric listing value: root number price, or price.sale, plus price.rent.amount when object
+    const listingValueExpr = {
+      $let: {
+        vars: { p: '$price' },
+        in: {
+          $add: [
+            {
+              $cond: [
+                { $isNumber: '$$p' },
+                '$$p',
+                {
+                  $convert: {
+                    input: { $ifNull: ['$$p.sale', null] },
+                    to: 'double',
+                    onError: 0,
+                    onNull: 0
+                  }
+                }
+              ]
+            },
+            {
+              $cond: [
+                { $eq: [{ $type: '$$p' }, 'object'] },
+                {
+                  $convert: {
+                    input: { $ifNull: ['$$p.rent.amount', null] },
+                    to: 'double',
+                    onError: 0,
+                    onNull: 0
+                  }
+                },
+                0
+              ]
+            }
+          ]
+        }
+      }
+    };
+
     // Use aggregation for efficient statistics
     const [
       propertiesByStatus,
@@ -448,7 +487,8 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       recentLeads,
       agentPerformance,
       totalAgenciesAll,
-      convertedClientsCount
+      totalClients,
+      clientActiveUsers
     ] = await Promise.all([
       // Properties by status
       Property.aggregate([
@@ -554,21 +594,14 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       // Total leads in this period/scope
       Lead.countDocuments(leadFilter),
 
-      // Total property value (sale prices only)
+      // Total property value (numeric price, sale, and/or rent amount)
       Property.aggregate([
         { $match: propertyFilter },
+        { $addFields: { listingValue: listingValueExpr } },
         {
           $group: {
             _id: null,
-            total: {
-              $sum: {
-                $cond: [
-                  { $ifNull: ['$price.sale', false] },
-                  '$price.sale',
-                  0
-                ]
-              }
-            }
+            total: { $sum: '$listingValue' }
           }
         }
       ]),
@@ -665,10 +698,15 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
           ? Promise.resolve(1)
           : Promise.resolve(0),
 
-      // Converted clients count (lead converted to client removes lead row)
+      // Client accounts (role user), scoped by same date/agency filter as other user metrics
       User.countDocuments({
         ...userFilter,
         role: 'user'
+      }),
+      User.countDocuments({
+        ...userFilter,
+        role: 'user',
+        isActive: true
       })
     ]);
 
@@ -699,11 +737,16 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       }))
     ].sort((a, b) => new Date(b.time) - new Date(a.time));
 
+    // Leads currently in a "won" status (still stored as Lead documents). Client accounts are separate (totalClients).
     const convertedLeadsFromStatuses =
       (formatStats(leadsByStatus).booked || 0) +
       (formatStats(leadsByStatus).closed || 0) +
       (formatStats(leadsByStatus).converted || 0);
-    const convertedLeads = convertedLeadsFromStatuses + (Number(convertedClientsCount) || 0);
+    const convertedLeads = convertedLeadsFromStatuses;
+    const clientInactiveUsers = Math.max(
+      (Number(totalClients) || 0) - (Number(clientActiveUsers) || 0),
+      0
+    );
 
     // Agency analysis (super_admin and agency_admin only)
     let agencyAnalysis = [];
@@ -719,7 +762,15 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
         ]),
         Property.aggregate([
           { $match: agencyFilterForList._id ? { agency: agencyFilterForList._id } : {} },
-          { $group: { _id: '$agency', totalProperties: { $sum: 1 }, activeProperties: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } }, totalPropertyValue: { $sum: { $ifNull: ['$price.sale', 0] } } } }
+          { $addFields: { listingValue: listingValueExpr } },
+          {
+            $group: {
+              _id: '$agency',
+              totalProperties: { $sum: 1 },
+              activeProperties: { $sum: { $cond: [{ $eq: ['$status', 'active'] }, 1, 0] } },
+              totalPropertyValue: { $sum: '$listingValue' }
+            }
+          }
         ]),
         Lead.aggregate([
           { $match: agencyFilterForList._id ? { agency: agencyFilterForList._id } : {} },
@@ -774,11 +825,17 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
 
     res.json({
       totalUsers,
+      totalClients: Number(totalClients) || 0,
       totalProperties,
       totalLeads,
-      totalLeadsWithConverted: totalLeads + convertedLeads,
+      /** @deprecated Do not use for headline totals — was leads + conversions and inflated counts vs Lead collection */
+      totalLeadsWithConverted: totalLeads,
       convertedLeads,
       totalAgencies: totalAgenciesAll,
+      clientStats: {
+        active: Number(clientActiveUsers) || 0,
+        inactive: clientInactiveUsers
+      },
       userStats: {
         activeUsers,
         inactiveUsers: Math.max(totalUsers - activeUsers, 0)

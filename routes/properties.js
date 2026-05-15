@@ -1039,7 +1039,7 @@ router.post('/:id/book', auth, async (req, res) => {
     res.json({
       message: 'Property booked successfully',
       property,
-      transaction
+      transaction 
     });
   } catch (error) {
     console.error('Book property error:', error);

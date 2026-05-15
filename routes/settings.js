@@ -57,10 +57,11 @@ router.get('/dropdown-options', optionalAuth, async (req, res) => {
       currencies: currencyCodes.length > 0 ? currencyCodes : ['AED', 'USD', 'INR'],
       currencyRates,
       timezones: [
-        '(UTC) Coordinated Universal Time',
-        '(EST) Eastern Standard Time',
-        '(PST) Pacific Standard Time',
-        '(GMT) Greenwich Mean Time'
+        '(UTC +00:00) Coordinated Universal Time',
+        '(UTC +05:30) India Standard Time',
+        '(UTC -05:00) Eastern Standard Time',
+        '(UTC -08:00) Pacific Standard Time',
+        '(UTC +00:00) Greenwich Mean Time'
       ],
       languages: ['English', 'Spanish', 'French', 'German'],
       logLevels: ['debug', 'info', 'warn', 'error'],
