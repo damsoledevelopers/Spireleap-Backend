@@ -28,7 +28,7 @@ const propertySchema = new mongoose.Schema({
   },
   propertyType: {
     type: String,
-    enum: ['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'other'],
+    enum: ['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'off_plan', 'ready_to_move', 'under_construction', 'other'],
     required: [true, 'Property type is required']
   },
   listingType: {
@@ -114,6 +114,10 @@ const propertySchema = new mongoose.Schema({
       type: Number,
       min: 0,
       default: 0
+    },
+    isStudio: {
+      type: Boolean,
+      default: false
     },
     unfurnished: {
       type: Number,

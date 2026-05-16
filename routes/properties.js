@@ -102,15 +102,22 @@ router.get('/filter-options', optionalAuth, async (req, res) => {
       ]
     };
 
-    const defaultPropertyTypes = ['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'other'];
+    const defaultPropertyTypes = ['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'off_plan', 'ready_to_move', 'under_construction', 'other'];
     const defaultListingTypes = ['sale', 'rent', 'both'];
 
     const safePropertyTypes = uniqSortedStrings(propertyTypes);
     const safeListingTypes = uniqSortedStrings(listingTypes);
 
+    const mergeWithDefaults = (defaults, fromDb) => {
+      const set = new Set([...defaults, ...fromDb]);
+      const ordered = defaults.filter((t) => set.has(t));
+      const extra = [...set].filter((t) => !defaults.includes(t)).sort((a, b) => a.localeCompare(b));
+      return [...ordered, ...extra];
+    };
+
     res.json({
-      propertyTypes: safePropertyTypes.length ? safePropertyTypes : defaultPropertyTypes,
-      listingTypes: safeListingTypes.length ? safeListingTypes : defaultListingTypes,
+      propertyTypes: mergeWithDefaults(defaultPropertyTypes, safePropertyTypes),
+      listingTypes: mergeWithDefaults(defaultListingTypes, safeListingTypes),
       locations: {
         cities: uniqSortedStrings([...(cities || []), ...cmsCities]),
         states: uniqSortedStrings([...(states || []), ...cmsStates]),
@@ -160,7 +167,8 @@ router.get('/', optionalAuth, [
   query('livingRoom').optional().isInt({ min: 0 }),
   query('unfurnished').optional().isInt({ min: 0 }),
   query('semiFurnished').optional().isInt({ min: 0 }),
-  query('fullyFurnished').optional().isInt({ min: 0 })
+  query('fullyFurnished').optional().isInt({ min: 0 }),
+  query('studio').optional().isIn(['0', '1', 'true', 'false'])
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
@@ -348,6 +356,9 @@ router.get('/', optionalAuth, [
     }
     if (req.query.fullyFurnished) {
       filter['specifications.fullyFurnished'] = parseInt(req.query.fullyFurnished);
+    }
+    if (req.query.studio === '1' || req.query.studio === 'true') {
+      filter['specifications.isStudio'] = true;
     }
     if (req.query.minArea || req.query.maxArea) {
       const areaFilter = {};
@@ -1059,7 +1070,7 @@ router.post('/', [
   checkModulePermission('properties', 'create'),
   body('title').optional({ values: 'falsy' }).trim(),
   body('description').optional({ values: 'falsy' }).trim(),
-  body('propertyType').isIn(['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'other']).withMessage('Invalid property type'),
+  body('propertyType').isIn(['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'off_plan', 'ready_to_move', 'under_construction', 'other']).withMessage('Invalid property type'),
   body('listingType').isIn(['sale', 'rent', 'both']).withMessage('Invalid listing type'),
   body('location.address').optional({ values: 'falsy' }).trim(),
   body('location.city').optional({ values: 'falsy' }).trim(),
