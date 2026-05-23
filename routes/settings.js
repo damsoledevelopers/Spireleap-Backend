@@ -16,7 +16,25 @@ const router = express.Router();
 // @access  Public
 router.get('/dropdown-options', optionalAuth, async (req, res) => {
   try {
-    const currencyDocs = await Currency.find({ isDeleted: false, status: true })
+    const defaultLanguages = ['English', 'Arabic', 'Hindi', 'Urdu', 'French', 'Spanish', 'German'];
+    let languages = [...defaultLanguages];
+    try {
+      const spokenSetting = await Settings.findOne({ key: 'general.spokenLanguageList' });
+      if (spokenSetting?.value) {
+        const raw = spokenSetting.value;
+        const list = Array.isArray(raw)
+          ? raw
+          : String(raw)
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean);
+        if (list.length > 0) languages = list;
+      }
+    } catch (_) {
+      // use defaults
+    }
+
+    const currencyDocs = await Currency.find({ isDeleted: false })
       .select('currencyCode aedRate')
       .sort({ currencyCode: 1 })
       .lean();
@@ -24,6 +42,11 @@ router.get('/dropdown-options', optionalAuth, async (req, res) => {
     const currencyCodes = (currencyDocs || [])
       .map((d) => String(d.currencyCode || '').trim().toUpperCase())
       .filter(Boolean);
+
+    // Base hub currency is always available for display/settings
+    if (!currencyCodes.includes('AED')) {
+      currencyCodes.unshift('AED');
+    }
 
     const currencyRates = (currencyDocs || []).reduce((acc, d) => {
       const code = String(d.currencyCode || '').trim().toUpperCase();
@@ -63,7 +86,8 @@ router.get('/dropdown-options', optionalAuth, async (req, res) => {
         '(UTC -08:00) Pacific Standard Time',
         '(UTC +00:00) Greenwich Mean Time'
       ],
-      languages: ['English', 'Spanish', 'French', 'German'],
+      languages,
+      spokenLanguages: languages.map((name) => ({ value: name, label: name })),
       logLevels: ['debug', 'info', 'warn', 'error'],
       backupFrequencies: ['hourly', 'daily', 'weekly', 'monthly'],
       budgetCurrencies: ['USD', 'EUR', 'GBP'],

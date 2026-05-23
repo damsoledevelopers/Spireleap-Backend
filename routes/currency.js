@@ -47,17 +47,48 @@ router.post(
         status: req.body.status !== undefined ? Boolean(req.body.status) : true,
       };
 
-      const dupCountry = await Currency.findOne({
-        isDeleted: false,
-        countryName: new RegExp(`^${escapeRegExp(String(req.body.countryName).trim())}$`, 'i')
-      });
-      if (dupCountry) {
-        return res.status(400).json({ message: 'A currency is already configured for this country' });
+      const countryRegex = new RegExp(`^${escapeRegExp(String(req.body.countryName).trim())}$`, 'i');
+
+      // Include soft-deleted rows: unique index still blocks re-insert with same code
+      const existingByCode = await Currency.findOne({ currencyCode: payload.currencyCode });
+      if (existingByCode) {
+        if (existingByCode.isDeleted) {
+          const countryTaken = await Currency.findOne({
+            isDeleted: false,
+            countryName: countryRegex,
+            _id: { $ne: existingByCode._id }
+          });
+          if (countryTaken) {
+            return res.status(400).json({
+              message: `Another active currency already uses country "${countryTaken.countryName}"`
+            });
+          }
+          existingByCode.isDeleted = false;
+          existingByCode.countryName = payload.countryName;
+          existingByCode.currencyName = payload.currencyName;
+          existingByCode.aedRate = payload.aedRate;
+          existingByCode.status = payload.status;
+          await existingByCode.save();
+          return res.status(200).json({ currency: existingByCode, restored: true });
+        }
+        return res.status(400).json({
+          message: `Currency code ${payload.currencyCode} is already used for ${existingByCode.countryName}`,
+          existingId: existingByCode._id
+        });
       }
 
-      const existing = await Currency.findOne({ currencyCode: payload.currencyCode, isDeleted: false });
-      if (existing) {
-        return res.status(400).json({ message: 'Currency code must be unique' });
+      const dupCountry = await Currency.findOne({ countryName: countryRegex });
+      if (dupCountry) {
+        if (dupCountry.isDeleted) {
+          dupCountry.isDeleted = false;
+          dupCountry.currencyName = payload.currencyName;
+          dupCountry.currencyCode = payload.currencyCode;
+          dupCountry.aedRate = payload.aedRate;
+          dupCountry.status = payload.status;
+          await dupCountry.save();
+          return res.status(200).json({ currency: dupCountry, restored: true });
+        }
+        return res.status(400).json({ message: 'A currency is already configured for this country' });
       }
 
       const currency = new Currency(payload);
@@ -79,10 +110,56 @@ router.post(
 // @access  Private
 router.get('/', auth, checkModulePermission('settings', 'view'), async (req, res) => {
   try {
-    const currencies = await Currency.find({ isDeleted: false }).sort({ countryName: 1, currencyCode: 1 });
-    res.json({ currencies });
+    const includeDeleted = String(req.query.includeDeleted || '').toLowerCase() === 'true';
+    const active = await Currency.find({ isDeleted: false }).sort({ countryName: 1, currencyCode: 1 });
+    if (!includeDeleted) {
+      return res.json({ currencies: active });
+    }
+    const hidden = await Currency.find({ isDeleted: true }).sort({ countryName: 1, currencyCode: 1 });
+    res.json({ currencies: active, hidden });
   } catch (error) {
     console.error('List currencies error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   POST /api/currency/:id/restore
+// @desc    Restore a soft-deleted currency
+// @access  Private
+router.post('/:id/restore', auth, checkModulePermission('settings', 'edit'), async (req, res) => {
+  try {
+    const currency = await Currency.findById(req.params.id);
+    if (!currency || !currency.isDeleted) {
+      return res.status(404).json({ message: 'Deleted currency not found' });
+    }
+
+    const codeClash = await Currency.findOne({
+      currencyCode: currency.currencyCode,
+      isDeleted: false,
+      _id: { $ne: currency._id }
+    });
+    if (codeClash) {
+      return res.status(400).json({
+        message: `Cannot restore: ${currency.currencyCode} is already active for ${codeClash.countryName}`
+      });
+    }
+
+    const countryClash = await Currency.findOne({
+      isDeleted: false,
+      countryName: new RegExp(`^${escapeRegExp(String(currency.countryName || '').trim())}$`, 'i'),
+      _id: { $ne: currency._id }
+    });
+    if (countryClash) {
+      return res.status(400).json({
+        message: `Cannot restore: country "${currency.countryName}" already has an active currency`
+      });
+    }
+
+    currency.isDeleted = false;
+    await currency.save();
+    res.json({ currency, restored: true });
+  } catch (error) {
+    console.error('Restore currency error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });

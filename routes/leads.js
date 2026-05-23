@@ -3,6 +3,7 @@ const crypto = require('crypto');
 const { body, validationResult, query } = require('express-validator');
 const mongoose = require('mongoose');
 const Lead = require('../models/Lead');
+const Settings = require('../models/Settings');
 const Property = require('../models/Property');
 const User = require('../models/User');
 const Agency = require('../models/Agency');
@@ -30,6 +31,24 @@ function pctDisplay(percent) {
 // @access  Public
 router.get('/field-options', optionalAuth, async (req, res) => {
   try {
+    const defaultSpokenLanguages = ['English', 'Arabic', 'Hindi', 'Urdu', 'French', 'Spanish', 'German'];
+    let spokenLanguageNames = [...defaultSpokenLanguages];
+    try {
+      const spokenSetting = await Settings.findOne({ key: 'general.spokenLanguageList' });
+      if (spokenSetting?.value) {
+        const raw = spokenSetting.value;
+        const list = Array.isArray(raw)
+          ? raw
+          : String(raw)
+              .split(',')
+              .map((s) => s.trim())
+              .filter(Boolean);
+        if (list.length > 0) spokenLanguageNames = list;
+      }
+    } catch (_) {
+      // use defaults
+    }
+
     // Served by backend so UI stays dynamic (can later move into Settings if needed).
     res.json({
       preferredRooms: [
@@ -62,15 +81,10 @@ router.get('/field-options', optionalAuth, async (req, res) => {
         { value: 'crypto', label: 'Crypto' },
         { value: 'other', label: 'Other' }
       ],
-      spokenLanguages: [
-        { value: 'english', label: 'English' },
-        { value: 'arabic', label: 'Arabic' },
-        { value: 'french', label: 'French' },
-        { value: 'spanish', label: 'Spanish' },
-        { value: 'hindi', label: 'Hindi' },
-        { value: 'urdu', label: 'Urdu' },
-        { value: 'other', label: 'Other' }
-      ]
+      spokenLanguages: spokenLanguageNames.map((name) => ({
+        value: name,
+        label: name
+      }))
     });
   } catch (error) {
     console.error('Get lead field options error:', error);

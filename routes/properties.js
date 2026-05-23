@@ -20,6 +20,9 @@ router.get('/filter-options', optionalAuth, async (req, res) => {
     const Amenity = require('../models/Amenity');
     const Location = require('../models/Location');
 
+    const Settings = require('../models/Settings');
+    const defaultSpokenLanguages = ['English', 'Arabic', 'Hindi', 'Urdu', 'French', 'Spanish', 'German'];
+
     const [
       propertyTypes,
       listingTypes,
@@ -32,7 +35,8 @@ router.get('/filter-options', optionalAuth, async (req, res) => {
       bathroomCounts,
       categories,
       amenities,
-      cmsLocations
+      cmsLocations,
+      spokenSetting
     ] = await Promise.all([
       Property.distinct('propertyType', {}),
       Property.distinct('listingType', {}),
@@ -45,8 +49,21 @@ router.get('/filter-options', optionalAuth, async (req, res) => {
       Property.distinct('specifications.bathrooms', {}),
       Category.find({ isActive: true }).select('_id name').sort({ order: 1, name: 1 }),
       Amenity.find({ isActive: true }).select('_id name icon category').sort({ order: 1, name: 1 }),
-      Location.find({ isDeleted: false, isActive: true }).select('country state city').lean()
+      Location.find({ isDeleted: false, isActive: true }).select('country state city').lean(),
+      Settings.findOne({ key: 'general.spokenLanguageList' }).lean()
     ]);
+
+    let spokenLanguageNames = [...defaultSpokenLanguages];
+    if (spokenSetting?.value) {
+      const raw = spokenSetting.value;
+      const list = Array.isArray(raw)
+        ? raw
+        : String(raw)
+            .split(',')
+            .map((s) => s.trim())
+            .filter(Boolean);
+      if (list.length > 0) spokenLanguageNames = list;
+    }
 
     const uniqSortedStrings = (arr) => [...new Set((arr || []).filter(Boolean).map(String).map(s => s.trim()).filter(Boolean))].sort();
     const uniqSortedNumbers = (arr) =>
@@ -91,15 +108,10 @@ router.get('/filter-options', optionalAuth, async (req, res) => {
         { value: 'crypto', label: 'Crypto' },
         { value: 'other', label: 'Other' }
       ],
-      spokenLanguages: [
-        { value: 'english', label: 'English' },
-        { value: 'arabic', label: 'Arabic' },
-        { value: 'french', label: 'French' },
-        { value: 'spanish', label: 'Spanish' },
-        { value: 'hindi', label: 'Hindi' },
-        { value: 'urdu', label: 'Urdu' },
-        { value: 'other', label: 'Other' }
-      ]
+      spokenLanguages: spokenLanguageNames.map((name) => ({
+        value: name,
+        label: name
+      }))
     };
 
     const defaultPropertyTypes = ['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'off_plan', 'ready_to_move', 'under_construction', 'other'];
@@ -158,6 +170,7 @@ router.get('/', optionalAuth, [
   query('minPrice').optional().isFloat({ min: 0 }),
   query('maxPrice').optional().isFloat({ min: 0 }),
   query('bedrooms').optional().isInt({ min: 0 }),
+  query('bedroomsMin').optional().isInt({ min: 0 }),
   query('bathrooms').optional().isInt({ min: 0 }),
   query('minArea').optional().isFloat({ min: 0 }),
   query('maxArea').optional().isFloat({ min: 0 }),
@@ -336,8 +349,13 @@ router.get('/', optionalAuth, [
     }
 
     // Specification filters
-    if (req.query.bedrooms) {
-      filter['specifications.bedrooms'] = parseInt(req.query.bedrooms);
+    if (req.query.bedroomsMin) {
+      filter['specifications.bedrooms'] = { $gte: parseInt(req.query.bedroomsMin, 10) };
+      filter['specifications.isStudio'] = { $ne: true };
+    } else if (req.query.bedrooms) {
+      const br = parseInt(req.query.bedrooms, 10);
+      filter['specifications.bedrooms'] = br;
+      filter['specifications.isStudio'] = { $ne: true };
     }
     if (req.query.bathrooms) {
       filter['specifications.bathrooms'] = parseInt(req.query.bathrooms);
@@ -1376,9 +1394,13 @@ router.put('/:id', [
       req.body.status = 'pending';
     }
 
-    // Normalize optional reference fields to prevent CastError on empty strings.
-    if (req.body.agency === '' || req.body.agency == null) delete req.body.agency;
-    if (req.body.agent === '' || req.body.agent == null) delete req.body.agent;
+    // Normalize optional reference fields (null explicitly clears agency/agent).
+    const clearAgency = Object.prototype.hasOwnProperty.call(req.body, 'agency') &&
+      (req.body.agency === null || req.body.agency === '');
+    const clearAgent = Object.prototype.hasOwnProperty.call(req.body, 'agent') &&
+      (req.body.agent === null || req.body.agent === '');
+    if (clearAgency) delete req.body.agency;
+    if (clearAgent) delete req.body.agent;
     if (req.body.category === '' || req.body.category == null) delete req.body.category;
     if (!Array.isArray(req.body.amenities)) req.body.amenities = [];
     req.body.tags = Array.isArray(req.body.tags) ? req.body.tags.filter(Boolean) : [];
@@ -1388,6 +1410,8 @@ router.put('/:id', [
     const newStatus = req.body.status;
 
     Object.assign(property, req.body);
+    if (clearAgency) property.agency = null;
+    if (clearAgent) property.agent = null;
     await property.save();
 
     const updatedProperty = await Property.findById(property._id)

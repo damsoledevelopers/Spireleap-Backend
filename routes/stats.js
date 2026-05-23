@@ -429,38 +429,37 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       userFilter.agency = req.user.agency;
     }
 
-    // Numeric listing value: root number price, or price.sale, plus price.rent.amount when object
+    const saleValueExpr = {
+      $convert: {
+        input: { $ifNull: ['$price.sale', null] },
+        to: 'double',
+        onError: 0,
+        onNull: 0
+      }
+    };
+
+    const rentValueExpr = {
+      $convert: {
+        input: { $ifNull: ['$price.rent.amount', null] },
+        to: 'double',
+        onError: 0,
+        onNull: 0
+      }
+    };
+
+    // Combined listing value (rent OR sale per property — for legacy total)
     const listingValueExpr = {
       $let: {
-        vars: { p: '$price' },
+        vars: { p: '$price', lt: '$listingType' },
         in: {
-          $add: [
+          $cond: [
+            { $isNumber: '$$p' },
+            '$$p',
             {
               $cond: [
-                { $isNumber: '$$p' },
-                '$$p',
-                {
-                  $convert: {
-                    input: { $ifNull: ['$$p.sale', null] },
-                    to: 'double',
-                    onError: 0,
-                    onNull: 0
-                  }
-                }
-              ]
-            },
-            {
-              $cond: [
-                { $eq: [{ $type: '$$p' }, 'object'] },
-                {
-                  $convert: {
-                    input: { $ifNull: ['$$p.rent.amount', null] },
-                    to: 'double',
-                    onError: 0,
-                    onNull: 0
-                  }
-                },
-                0
+                { $eq: ['$$lt', 'rent'] },
+                rentValueExpr,
+                saleValueExpr
               ]
             }
           ]
@@ -483,6 +482,8 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       totalProperties,
       totalLeads,
       totalPropertyValue,
+      totalSalePropertyValue,
+      totalRentPropertyValue,
       recentProperties,
       recentLeads,
       agentPerformance,
@@ -594,7 +595,7 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       // Total leads in this period/scope
       Lead.countDocuments(leadFilter),
 
-      // Total property value (numeric price, sale, and/or rent amount)
+      // Total property value (combined — legacy)
       Property.aggregate([
         { $match: propertyFilter },
         { $addFields: { listingValue: listingValueExpr } },
@@ -602,6 +603,28 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
           $group: {
             _id: null,
             total: { $sum: '$listingValue' }
+          }
+        }
+      ]),
+
+      // Total sale value (for-sale listings)
+      Property.aggregate([
+        { $match: { ...propertyFilter, listingType: 'sale' } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: saleValueExpr }
+          }
+        }
+      ]),
+
+      // Total rent value (for-rent listings)
+      Property.aggregate([
+        { $match: { ...propertyFilter, listingType: 'rent' } },
+        {
+          $group: {
+            _id: null,
+            total: { $sum: rentValueExpr }
           }
         }
       ]),
@@ -849,6 +872,8 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       leadsByPriority: formatStats(leadsByPriority),
       usersByRole: formatStats(usersByRole),
       totalPropertyValue: totalPropertyValue[0]?.total || 0,
+      totalSalePropertyValue: totalSalePropertyValue[0]?.total || 0,
+      totalRentPropertyValue: totalRentPropertyValue[0]?.total || 0,
       recentActivity,
       agentPerformance: agentPerformance.map(a => ({
         ...a,

@@ -28,23 +28,26 @@ const allowedOrigins = [
 ].filter(Boolean);
 
 app.use(cors({
-  origin: function (origin, callback) {
+  origin(origin, callback) {
+    // Non-browser clients (curl, Postman) may omit Origin
     if (!origin) return callback(null, true);
 
-    const isAllowed = allowedOrigins.some(allowed => {
+    const isAllowed = allowedOrigins.some((allowed) => {
       if (typeof allowed === 'string') return origin === allowed;
       if (allowed instanceof RegExp) return allowed.test(origin);
       return false;
     });
 
-    if (isAllowed) {
-      callback(null, true);
+    const allowDev =
+      process.env.NODE_ENV !== 'production' ||
+      origin.includes('localhost') ||
+      origin.includes('127.0.0.1');
+
+    if (isAllowed || allowDev) {
+      // Must echo the request origin when credentials: true (* is invalid)
+      callback(null, origin);
     } else {
-      if (process.env.NODE_ENV !== 'production' || (origin && origin.includes('localhost'))) {
-        callback(null, true);
-      } else {
-        callback(new Error('Not allowed by CORS'));
-      }
+      callback(new Error(`Not allowed by CORS: ${origin}`));
     }
   },
   credentials: true,
@@ -161,8 +164,18 @@ const io = initializeSocket(server);
 // Start Server
 // --------------------
 const PORT = process.env.PORT || 5000;
+server.on('error', (err) => {
+  if (err.code === 'EADDRINUSE') {
+    console.error(
+      `Port ${PORT} is already in use. Stop the other process (e.g. another Node app) or set PORT=5001 in .env`
+    );
+    process.exit(1);
+  }
+  throw err;
+});
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`Server running on port ${PORT}`);
+  console.log(`API health: http://localhost:${PORT}/api/health`);
 
   if (process.env.ENABLE_REMINDER_SCHEDULER === 'true' || process.env.NODE_ENV === 'production') {
     const reminderScheduler = require('./schedulers/reminderScheduler');

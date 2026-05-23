@@ -11,7 +11,6 @@ function initializeSocket(server) {
   io = new Server(server, {
     cors: {
       origin: (origin, callback) => {
-        // Allow mobile/native clients (no Origin) and dev LAN access
         if (!origin) return callback(null, true);
 
         const allowed = [
@@ -20,10 +19,9 @@ function initializeSocket(server) {
           'http://localhost:3001'
         ].filter(Boolean);
 
-        if (allowed.includes(origin)) return callback(null, true);
+        if (allowed.includes(origin)) return callback(null, origin);
 
-        // In non-production, allow any origin to ease local/LAN development
-        if (process.env.NODE_ENV !== 'production') return callback(null, true);
+        if (process.env.NODE_ENV !== 'production') return callback(null, origin);
 
         return callback(new Error('Not allowed by CORS'));
       },
