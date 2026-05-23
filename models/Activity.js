@@ -8,12 +8,12 @@ const activitySchema = new mongoose.Schema({
             'user_created', 'user_updated', 'user_deleted',
             'transaction_created', 'transaction_updated',
             'note_added', 'communication_logged', 'task_created', 'task_completed',
-            'other'],
+            'other', 'validation_error', 'system_error'],
     required: true
   },
   entityType: {
     type: String,
-    enum: ['lead', 'property', 'user', 'transaction', 'agency', 'other'],
+    enum: ['lead', 'property', 'user', 'transaction', 'agency', 'system', 'other'],
     required: true
   },
   entityId: {
@@ -34,8 +34,7 @@ const activitySchema = new mongoose.Schema({
   },
   performedBy: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'User',
-    required: true
+    ref: 'User'
   },
   relatedUsers: [{
     type: mongoose.Schema.Types.ObjectId,

@@ -154,7 +154,7 @@ const leadSchema = new mongoose.Schema({
   agency: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Agency',
-    required: [true, 'Agency is required']
+    required: false
   },
   assignedAgent: {
     type: mongoose.Schema.Types.ObjectId,

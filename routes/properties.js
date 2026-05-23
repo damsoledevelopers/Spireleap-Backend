@@ -8,6 +8,7 @@ const { auth, authorize, optionalAuth, checkModulePermission } = require('../mid
 const emailService = require('../services/emailService');
 const Lead = require('../models/Lead');
 const Transaction = require('../models/Transaction');
+const activityService = require('../services/activityService');
 
 const router = express.Router();
 
@@ -1213,6 +1214,13 @@ router.post('/', [
       .populate('category', 'name')
       .populate('amenities', 'name icon');
 
+    await activityService.logPropertyActivity(
+      populatedProperty,
+      'property_created',
+      req.user,
+      'Property created'
+    );
+
     // Send notifications
     setImmediate(async () => {
       try {
@@ -1419,6 +1427,15 @@ router.put('/:id', [
       .populate('agent', 'firstName lastName email phone')
       .populate('category', 'name')
       .populate('amenities', 'name icon');
+
+    await activityService.logPropertyActivity(
+      updatedProperty,
+      newStatus && newStatus !== oldStatus ? 'property_updated' : 'property_updated',
+      req.user,
+      newStatus && newStatus !== oldStatus
+        ? `Status: ${oldStatus} → ${newStatus}`
+        : 'Property updated'
+    );
 
     // Send notifications for Sold, Rented, Unavailable status updates
     const importantStatuses = ['sold', 'rented', 'unavailable', 'inactive'];

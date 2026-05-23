@@ -5,6 +5,8 @@ const Lead = require('../models/Lead');
 const User = require('../models/User');
 const Agency = require('../models/Agency');
 const Transaction = require('../models/Transaction');
+const Activity = require('../models/Activity');
+const activityService = require('../services/activityService');
 const { auth, authorize, checkModulePermission } = require('../middleware/auth');
 
 const router = express.Router();
@@ -742,23 +744,47 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       return result;
     };
 
-    // Format recent activity
-    const recentActivity = [
-      ...recentProperties.map(p => ({
+    const activityFilter = {};
+    if (req.user.role === 'agency_admin' && agencyIdForFilter) {
+      activityFilter.agency = agencyIdForFilter;
+    } else if (req.user.role === 'agent') {
+      const agentId =
+        req.user.id && mongoose.Types.ObjectId.isValid(req.user.id)
+          ? new mongoose.Types.ObjectId(req.user.id)
+          : req.user.id;
+      activityFilter.$or = [{ performedBy: agentId }, { relatedUsers: agentId }];
+    }
+
+    const activityDocs = await Activity.find(activityFilter)
+      .populate('performedBy', 'firstName lastName email')
+      .sort({ createdAt: -1 })
+      .limit(30)
+      .lean();
+
+    const fromActivityLog = activityService.formatForRecentFeed(activityDocs);
+
+    const legacyActivity = [
+      ...recentProperties.map((p) => ({
         type: 'property_added',
         message: `New property: ${p.title}`,
+        description: '',
         time: p.createdAt,
         user: p.agent ? `${p.agent.firstName || ''} ${p.agent.lastName || ''}`.trim() : 'System',
         link: `/admin/properties/${p._id}`
       })),
-      ...recentLeads.map(l => ({
+      ...recentLeads.map((l) => ({
         type: 'lead_created',
         message: `New lead: ${l.contact?.firstName || ''} ${l.contact?.lastName || ''}`.trim(),
+        description: '',
         time: l.createdAt,
         user: l.source || 'Website',
         link: `/admin/leads/${l._id}`
       }))
-    ].sort((a, b) => new Date(b.time) - new Date(a.time));
+    ];
+
+    const recentActivity = [...fromActivityLog, ...legacyActivity]
+      .sort((a, b) => new Date(b.time) - new Date(a.time))
+      .slice(0, 25);
 
     // Leads currently in a "won" status (still stored as Lead documents). Client accounts are separate (totalClients).
     const convertedLeadsFromStatuses =

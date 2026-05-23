@@ -110,6 +110,49 @@ class ActivityService {
     return titles[type] || `Activity on property: ${propertyTitle}`;
   }
 
+  async logSystemActivity({ type = 'system_error', title, description, user, agency, metadata = {} }) {
+    const mongoose = require('mongoose');
+    const allowed = ['validation_error', 'system_error', 'other'];
+    const safeType = allowed.includes(type) ? type : 'system_error';
+    return this.logActivity({
+      type: safeType,
+      entityType: 'system',
+      entityId: new mongoose.Types.ObjectId(),
+      title: title || 'System activity',
+      description: description || '',
+      metadata,
+      agency: agency || undefined,
+      performedBy: user?._id || user?.id || undefined
+    });
+  }
+
+  buildActivityLink(activity) {
+    if (!activity?.entityId) return null;
+    const id = activity.entityId._id || activity.entityId;
+    if (activity.entityType === 'lead') return `/admin/leads/${id}`;
+    if (activity.entityType === 'property') return `/admin/properties/${id}`;
+    if (activity.entityType === 'transaction') return `/admin/transactions`;
+    if (activity.entityType === 'system' && activity.metadata?.path) return activity.metadata.path;
+    return null;
+  }
+
+  formatForRecentFeed(activities = []) {
+    return activities.map((a) => {
+      const performer = a.performedBy;
+      const userName = performer
+        ? `${performer.firstName || ''} ${performer.lastName || ''}`.trim() || performer.email
+        : 'System';
+      return {
+        type: a.type,
+        message: a.title || a.description || 'Activity',
+        description: a.description && a.description !== a.title ? a.description : '',
+        time: a.createdAt,
+        user: userName,
+        link: this.buildActivityLink(a)
+      };
+    });
+  }
+
   getTransactionActivityTitle(type, transaction) {
     const titles = {
       'transaction_created': `Transaction created: ${transaction.amount} ${transaction.currency}`,

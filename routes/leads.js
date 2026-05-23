@@ -15,6 +15,7 @@ const leadScoringService = require('../services/leadScoringService');
 const webhookService = require('../services/webhookService');
 const encryptionService = require('../services/encryptionService');
 const { normalizePhoneToE164 } = require('../utils/phone');
+const activityService = require('../services/activityService');
 
 const router = express.Router();
 
@@ -778,6 +779,9 @@ router.post('/', optionalAuth, [
 
     // SECURITY: Agency admin and agents can only create leads for their own agency
     let agencyId = req.body.agency;
+    if (agencyId === '__none__' || agencyId === '') agencyId = null;
+    const agencyExplicitlyNone =
+      req.body.hasOwnProperty('agency') && (req.body.agency === null || req.body.agency === '');
 
     if (req.user) {
       if (req.user.role === 'agency_admin' || req.user.role === 'agent') {
@@ -809,8 +813,8 @@ router.post('/', optionalAuth, [
       }
     }
 
-    // If no agency determined, try default
-    if (!agencyId) {
+    // If no agency determined, try default (skip when user explicitly chose "No agency")
+    if (!agencyId && !agencyExplicitlyNone) {
       const defaultAgency = await Agency.findOne({ isActive: true }).sort({ createdAt: 1 });
       if (!defaultAgency) {
         return res.status(400).json({
@@ -821,10 +825,13 @@ router.post('/', optionalAuth, [
       agencyId = defaultAgency._id;
     }
 
-    // Validate the agency exists
-    const agency = await Agency.findById(agencyId);
-    if (!agency) {
-      return res.status(400).json({ message: 'Selected agency does not exist' });
+    // Validate the agency exists when one is set
+    let agency = null;
+    if (agencyId) {
+      agency = await Agency.findById(agencyId);
+      if (!agency) {
+        return res.status(400).json({ message: 'Selected agency does not exist' });
+      }
     }
 
     // Check for duplicate leads (by email or phone)
@@ -984,13 +991,13 @@ router.post('/', optionalAuth, [
 
     // Auto-assign agent if not provided and auto-assignment is enabled
     let assignedAgentId = req.body.assignedAgent || null;
-    if (req.user) {
-      const agency = await Agency.findById(agencyId);
-      if (!assignedAgentId) {
-        if (agency?.settings?.autoAssignLeads) {
-          const assignmentMethod = agency.settings.assignmentMethod || 'round_robin';
-          assignedAgentId = await leadAssignmentService.autoAssignLead(agencyId, assignmentMethod, req.body);
-        }
+    if (assignedAgentId === '__none__' || assignedAgentId === '') assignedAgentId = null;
+
+    if (req.user && agencyId) {
+      const agencyForAssign = await Agency.findById(agencyId);
+      if (!assignedAgentId && agencyForAssign?.settings?.autoAssignLeads) {
+        const assignmentMethod = agencyForAssign.settings.assignmentMethod || 'round_robin';
+        assignedAgentId = await leadAssignmentService.autoAssignLead(agencyId, assignmentMethod, req.body);
       }
     }
 
@@ -1000,8 +1007,7 @@ router.post('/', optionalAuth, [
       if (!assignedAgent) {
         return res.status(400).json({ message: 'Assigned agent not found' });
       }
-      // Agent must be from same agency (or be from an agency if no agency filter)
-      if (assignedAgent.agency && assignedAgent.agency.toString() !== agencyId.toString()) {
+      if (agencyId && assignedAgent.agency && assignedAgent.agency.toString() !== agencyId.toString()) {
         return res.status(403).json({
           message: 'Cannot assign agents from different agencies',
           code: 'AGENT_AGENCY_MISMATCH'
@@ -1021,7 +1027,7 @@ router.post('/', optionalAuth, [
 
     const leadData = {
       ...req.body,
-      agency: agencyId,
+      agency: agencyExplicitlyNone ? null : agencyId,
       source: source,
       status: status,
       priority: priority,
@@ -1055,6 +1061,19 @@ router.post('/', optionalAuth, [
     });
 
     await lead.save();
+
+    const populatedLeadForActivity = await Lead.findById(lead._id)
+      .populate('agency', 'name')
+      .populate('assignedAgent', 'firstName lastName');
+
+    if (req.user) {
+      await activityService.logLeadActivity(
+        populatedLeadForActivity,
+        'lead_created',
+        req.user,
+        req.user ? 'Lead created' : 'Lead submitted from website'
+      );
+    }
 
     // Auto-score the lead
     try {
@@ -1105,9 +1124,31 @@ router.post('/', optionalAuth, [
         field: err.path,
         message: err.message
       }));
+      const detail = validationErrors.map((e) => `${e.field}: ${e.message}`).join('; ');
+      if (req.user) {
+        await activityService.logSystemActivity({
+          type: 'validation_error',
+          title: 'Lead validation failed',
+          description: detail || error.message,
+          user: req.user,
+          agency: req.user.agency,
+          metadata: { path: '/admin/leads', method: 'POST', errors: validationErrors }
+        });
+      }
       return res.status(400).json({
         message: 'Validation error',
         errors: validationErrors
+      });
+    }
+
+    if (req.user) {
+      await activityService.logSystemActivity({
+        type: 'system_error',
+        title: 'Lead creation failed',
+        description: error.message || 'Unknown error',
+        user: req.user,
+        agency: req.user.agency,
+        metadata: { path: '/api/leads', method: 'POST' }
       });
     }
 
@@ -1308,6 +1349,18 @@ router.put('/:id', auth, checkModulePermission('leads', 'edit'), async (req, res
       req.body.source = getNormalizedSource(req.body.source);
     }
 
+    if (req.body.hasOwnProperty('agency')) {
+      if (req.body.agency === '__none__' || req.body.agency === '') {
+        req.body.agency = null;
+        req.body.assignedAgent = null;
+      }
+    }
+    if (req.body.hasOwnProperty('assignedAgent')) {
+      if (req.body.assignedAgent === '__none__' || req.body.assignedAgent === '') {
+        req.body.assignedAgent = null;
+      }
+    }
+
     // Normalize status if provided
     if (req.body.status) {
       const validStatuses = ['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation', 'booked', 'lost', 'closed', 'junk'];
@@ -1386,6 +1439,21 @@ router.put('/:id', auth, checkModulePermission('leads', 'edit'), async (req, res
     // We already normalized at the beginning
 
     await lead.save();
+
+    if (req.user) {
+      const activityType =
+        req.body.status && req.body.status !== previousStatus
+          ? 'lead_status_changed'
+          : 'lead_updated';
+      await activityService.logLeadActivity(
+        lead,
+        activityType,
+        req.user,
+        activityType === 'lead_status_changed'
+          ? `Status: ${previousStatus} → ${req.body.status}`
+          : 'Lead updated'
+      );
+    }
 
     // Recalculate lead score in real-time when lead is updated
     // This ensures score updates when source, budget, timeline, or inquiry changes
@@ -1470,15 +1538,36 @@ router.put('/:id', auth, checkModulePermission('leads', 'edit'), async (req, res
     console.error('Error stack:', error.stack);
     console.error('Request body:', JSON.stringify(req.body, null, 2));
 
-    // Return more detailed error message
     if (error.name === 'ValidationError') {
       const validationErrors = Object.values(error.errors).map(err => ({
         field: err.path,
         message: err.message
       }));
+      const detail = validationErrors.map((e) => `${e.field}: ${e.message}`).join('; ');
+      if (req.user) {
+        await activityService.logSystemActivity({
+          type: 'validation_error',
+          title: 'Lead update validation failed',
+          description: detail || error.message,
+          user: req.user,
+          agency: req.user.agency,
+          metadata: { path: `/api/leads/${req.params.id}`, method: 'PUT', errors: validationErrors }
+        });
+      }
       return res.status(400).json({
         message: 'Validation error',
         errors: validationErrors
+      });
+    }
+
+    if (req.user) {
+      await activityService.logSystemActivity({
+        type: 'system_error',
+        title: 'Lead update failed',
+        description: error.message || 'Unknown error',
+        user: req.user,
+        agency: req.user.agency,
+        metadata: { path: `/api/leads/${req.params.id}`, method: 'PUT' }
       });
     }
 
