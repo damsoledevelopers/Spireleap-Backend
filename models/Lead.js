@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+﻿const mongoose = require('mongoose');
 const { isPostalDigitsOrEmpty, POSTAL_DIGITS_VALIDATION_MESSAGE } = require('../utils/postalCode');
 
 const ALPHA_TEXT_REGEX = /^[A-Za-z\s.'-]+$/;
@@ -338,6 +338,7 @@ const leadSchema = new mongoose.Schema({
       enum: ['high', 'medium', 'low', 'not_interested']
     },
     nextAction: String,
+    completionPhoto: String,
     relationshipManager: {
       type: mongoose.Schema.Types.ObjectId,
       ref: 'User'
@@ -358,6 +359,7 @@ const leadSchema = new mongoose.Schema({
     feedback: String,
     interestLevel: { type: String, enum: ['high', 'medium', 'low', 'not_interested'] },
     nextAction: String,
+    completionPhoto: String,
     relationshipManager: { type: mongoose.Schema.Types.ObjectId, ref: 'User' },
     property: { type: mongoose.Schema.Types.ObjectId, ref: 'Property' }
   }],

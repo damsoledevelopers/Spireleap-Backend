@@ -16,10 +16,102 @@ const webhookService = require('../services/webhookService');
 const encryptionService = require('../services/encryptionService');
 const { normalizePhoneToE164 } = require('../utils/phone');
 const activityService = require('../services/activityService');
+const multer = require('multer');
+const path = require('path');
+const { compressImageToJpeg } = require('../utils/imageCompress');
 
 const router = express.Router();
 
+const siteVisitPhotoUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => {
+    const allowed = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp', 'image/gif'];
+    if (allowed.includes(file.mimetype)) cb(null, true);
+    else cb(new Error('Only image files are allowed for visit photo'), false);
+  }
+});
+
 const activeStatuses = ['new', 'contacted', 'qualified', 'site_visit_scheduled', 'site_visit_completed', 'negotiation'];
+
+function siteVisitPropertyId(visit) {
+  if (!visit) return '';
+  const p = visit.property;
+  if (p && typeof p === 'object' && p._id) return p._id.toString();
+  return p ? String(p) : '';
+}
+
+function siteVisitsMatch(a, b) {
+  if (!a || !b) return false;
+  if (a._id && b._id && a._id.toString() === b._id.toString()) return true;
+  if (a.status !== b.status) return false;
+
+  const aSched = a.scheduledDate ? new Date(a.scheduledDate).getTime() : null;
+  const bSched = b.scheduledDate ? new Date(b.scheduledDate).getTime() : null;
+  const aDone = a.completedDate ? new Date(a.completedDate).getTime() : null;
+  const bDone = b.completedDate ? new Date(b.completedDate).getTime() : null;
+
+  if (aSched != null && bSched != null && aSched === bSched) {
+    if (!aDone && !bDone) return true;
+    if (aDone != null && bDone != null && aDone === bDone) return true;
+  }
+
+  // Stale siteVisit mirror: same property + scheduled, one copy may lack scheduledDate
+  if (a.status === 'scheduled' && b.status === 'scheduled') {
+    const propA = siteVisitPropertyId(a);
+    const propB = siteVisitPropertyId(b);
+    if (propA && propB && propA === propB) {
+      if (aSched != null && bSched != null && aSched !== bSched) return false;
+      const timeA = (a.scheduledTime || '').trim();
+      const timeB = (b.scheduledTime || '').trim();
+      if (timeA && timeB && timeA !== timeB) return false;
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function pickBetterSiteVisit(a, b) {
+  if (!a) return b;
+  if (!b) return a;
+  const aHasDate = a.scheduledDate ? 1 : 0;
+  const bHasDate = b.scheduledDate ? 1 : 0;
+  if (aHasDate !== bHasDate) return aHasDate > bHasDate ? a : b;
+  return a;
+}
+
+function dedupeSiteVisitsArray(visits) {
+  if (!visits || !visits.length) return visits || [];
+  const out = [];
+  for (const v of visits) {
+    const idx = out.findIndex((existing) => siteVisitsMatch(existing, v));
+    if (idx === -1) {
+      out.push(v);
+    } else {
+      out[idx] = pickBetterSiteVisit(out[idx], v);
+    }
+  }
+  return out;
+}
+
+function syncLeadSiteVisitPointer(lead) {
+  if (!lead.siteVisits || !lead.siteVisits.length) {
+    lead.siteVisit = undefined;
+    return;
+  }
+  const scheduled = [...lead.siteVisits].reverse().find((v) => v.status === 'scheduled');
+  if (scheduled) {
+    lead.siteVisit = scheduled;
+    return;
+  }
+  if (lead.siteVisit) {
+    const canonical = lead.siteVisits.find((v) => siteVisitsMatch(v, lead.siteVisit));
+    lead.siteVisit = canonical || lead.siteVisits[lead.siteVisits.length - 1];
+    return;
+  }
+  lead.siteVisit = lead.siteVisits[lead.siteVisits.length - 1];
+}
 
 /** Percent 0–100 for API JSON: 0 stays numeric 0 (not "0.00"); otherwise up to one decimal */
 function pctDisplay(percent) {
@@ -147,6 +239,10 @@ const normalizeLeadData = (lead) => {
   if (lead) {
     lead.priority = getNormalizedPriority(lead.priority);
     lead.source = getNormalizedSource(lead.source);
+    if (lead.siteVisits && lead.siteVisits.length > 0) {
+      lead.siteVisits = dedupeSiteVisitsArray(lead.siteVisits);
+      syncLeadSiteVisitPointer(lead);
+    }
   }
   return lead;
 };
@@ -3445,15 +3541,21 @@ router.post('/:id/site-visit', auth, checkModulePermission('leads', 'edit'), [
       }
     }
 
-    // Ensure siteVisits array exists (migrate from single siteVisit if needed)
+    // Ensure siteVisits array exists and current siteVisit is tracked in the array
     if (!lead.siteVisits || !Array.isArray(lead.siteVisits)) {
       lead.siteVisits = [];
     }
-    if (lead.siteVisit && lead.siteVisit.scheduledDate && lead.siteVisits.length === 0) {
-      lead.siteVisits.push({
-        ...lead.siteVisit.toObject ? lead.siteVisit.toObject() : lead.siteVisit,
-        _id: lead.siteVisit._id || new (require('mongoose').Types.ObjectId)()
-      });
+    if (lead.siteVisit && (lead.siteVisit.scheduledDate || lead.siteVisit.status)) {
+      const currentId = lead.siteVisit._id ? lead.siteVisit._id.toString() : null;
+      const alreadyInArray = currentId
+        ? lead.siteVisits.some((v) => v._id && v._id.toString() === currentId)
+        : lead.siteVisits.some((v) => siteVisitsMatch(v, lead.siteVisit));
+      if (!alreadyInArray) {
+        lead.siteVisits.push({
+          ...(lead.siteVisit.toObject ? lead.siteVisit.toObject() : lead.siteVisit),
+          _id: lead.siteVisit._id || new (require('mongoose').Types.ObjectId)()
+        });
+      }
     }
 
     const newVisit = {
@@ -3465,19 +3567,16 @@ router.post('/:id/site-visit', auth, checkModulePermission('leads', 'edit'), [
       property: req.body.property || req.body.propertyId || undefined
     };
     lead.siteVisits.push(newVisit);
-    lead.siteVisit = {
-      ...newVisit,
-      scheduledDate: newVisit.scheduledDate,
-      scheduledTime: newVisit.scheduledTime,
-      status: 'scheduled',
-      relationshipManager: newVisit.relationshipManager,
-      property: newVisit.property
-    };
+    lead.siteVisits = dedupeSiteVisitsArray(lead.siteVisits);
+    syncLeadSiteVisitPointer(lead);
 
     // Update lead status
     if (lead.status === 'qualified' || lead.status === 'contacted' || lead.status === 'new') {
       lead.status = 'site_visit_scheduled';
     }
+
+    lead.markModified('siteVisits');
+    lead.markModified('siteVisit');
 
     // Track Activity
     lead.activityLog.push({
@@ -3626,9 +3725,20 @@ router.post('/:id/site-visit', auth, checkModulePermission('leads', 'edit'), [
 });
 
 // @route   PUT /api/leads/:id/site-visit/complete
-// @desc    Mark site visit as completed
+// @desc    Mark site visit as completed (optional photo upload)
 // @access  Private
-router.put('/:id/site-visit/complete', auth, checkModulePermission('leads', 'edit'), [
+router.put('/:id/site-visit/complete', auth, checkModulePermission('leads', 'edit'), (req, res, next) => {
+  siteVisitPhotoUpload.single('photo')(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ message: 'Photo is too large. Please try another image.' });
+      }
+      return res.status(400).json({ message: err.message });
+    }
+    if (err) return res.status(400).json({ message: err.message });
+    next();
+  });
+}, [
   body('feedback').optional().trim(),
   body('interestLevel').optional({ checkFalsy: true }).trim().isIn(['high', 'medium', 'low', 'not_interested']).withMessage('interestLevel must be one of: high, medium, low, not_interested'),
   body('nextAction').optional().trim()
@@ -3639,21 +3749,40 @@ router.put('/:id/site-visit/complete', auth, checkModulePermission('leads', 'edi
       return res.status(400).json({ errors: errors.array(), message: errors.array().map(e => e.msg).join(', ') });
     }
 
+    let completionPhotoPath = null;
+    if (req.file && req.file.buffer) {
+      const uploadsDir = path.join('uploads', 'site-visits');
+      const filename = `visit-${req.params.id}-${Date.now()}.jpg`;
+      const destPath = path.join(uploadsDir, filename);
+      await compressImageToJpeg(req.file.buffer, destPath);
+      completionPhotoPath = `uploads/site-visits/${filename}`.replace(/\\/g, '/');
+    }
+
     const lead = await Lead.findById(req.params.id);
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found' });
     }
 
+    const requestedVisitId = req.body.visitId ? String(req.body.visitId).trim() : null;
     let visitToComplete = null;
-    if (lead.siteVisit && (lead.siteVisit.scheduledDate || lead.siteVisit.status === 'scheduled')) {
+
+    if (requestedVisitId && lead.siteVisits && lead.siteVisits.length) {
+      visitToComplete = lead.siteVisits.find(
+        (v) => v._id && v._id.toString() === requestedVisitId
+      );
+    }
+    if (!visitToComplete && lead.siteVisit && lead.siteVisit.status === 'scheduled') {
       visitToComplete = lead.siteVisit;
-    } else if (lead.siteVisits && lead.siteVisits.length) {
-      const scheduled = lead.siteVisits.filter(v => v.status === 'scheduled');
-      visitToComplete = scheduled.length ? scheduled[scheduled.length - 1] : lead.siteVisits[lead.siteVisits.length - 1];
-      if (visitToComplete) lead.siteVisit = visitToComplete;
+    }
+    if (!visitToComplete && lead.siteVisits && lead.siteVisits.length) {
+      const scheduled = lead.siteVisits.filter((v) => v.status === 'scheduled');
+      visitToComplete = scheduled.length ? scheduled[scheduled.length - 1] : null;
     }
     if (!visitToComplete) {
-      return res.status(400).json({ message: 'No site visit found to complete. Schedule a site visit first.' });
+      return res.status(400).json({ message: 'No scheduled site visit found to complete. Schedule a site visit first.' });
+    }
+    if (visitToComplete.status === 'completed') {
+      return res.status(400).json({ message: 'This site visit is already completed.' });
     }
 
     visitToComplete.status = 'completed';
@@ -3661,21 +3790,37 @@ router.put('/:id/site-visit/complete', auth, checkModulePermission('leads', 'edi
     if (req.body.feedback) visitToComplete.feedback = req.body.feedback;
     if (req.body.interestLevel) visitToComplete.interestLevel = req.body.interestLevel;
     if (req.body.nextAction) visitToComplete.nextAction = req.body.nextAction;
+    if (completionPhotoPath) visitToComplete.completionPhoto = completionPhotoPath;
 
-    // Sync completion into siteVisits array so GET returns consistent data (frontend reads from siteVisits)
-    if (lead.siteVisits && Array.isArray(lead.siteVisits)) {
-      const visitId = visitToComplete._id ? visitToComplete._id.toString() : null;
-      const idx = visitId
-        ? lead.siteVisits.findIndex(v => v._id && v._id.toString() === visitId)
-        : lead.siteVisits.length - 1;
-      if (idx !== -1) {
-        lead.siteVisits[idx].status = 'completed';
-        lead.siteVisits[idx].completedDate = visitToComplete.completedDate;
-        if (req.body.feedback !== undefined) lead.siteVisits[idx].feedback = req.body.feedback;
-        if (req.body.interestLevel) lead.siteVisits[idx].interestLevel = req.body.interestLevel;
-        if (req.body.nextAction !== undefined) lead.siteVisits[idx].nextAction = req.body.nextAction;
-      }
+    // Sync completion into siteVisits array (update in place; never duplicate the same visit)
+    if (!lead.siteVisits || !Array.isArray(lead.siteVisits)) {
+      lead.siteVisits = [];
     }
+    const visitId = visitToComplete._id ? visitToComplete._id.toString() : null;
+    let idx = visitId
+      ? lead.siteVisits.findIndex((v) => v._id && v._id.toString() === visitId)
+      : -1;
+    if (idx === -1) {
+      idx = lead.siteVisits.findIndex((v) => siteVisitsMatch(v, visitToComplete));
+    }
+    if (idx === -1) {
+      lead.siteVisits.push({
+        ...(visitToComplete.toObject ? visitToComplete.toObject() : visitToComplete),
+        _id: visitToComplete._id || new mongoose.Types.ObjectId()
+      });
+      idx = lead.siteVisits.length - 1;
+    }
+    lead.siteVisits[idx].status = 'completed';
+    lead.siteVisits[idx].completedDate = visitToComplete.completedDate;
+    if (req.body.feedback !== undefined) lead.siteVisits[idx].feedback = req.body.feedback;
+    if (req.body.interestLevel) lead.siteVisits[idx].interestLevel = req.body.interestLevel;
+    if (req.body.nextAction !== undefined) lead.siteVisits[idx].nextAction = req.body.nextAction;
+    if (completionPhotoPath) lead.siteVisits[idx].completionPhoto = completionPhotoPath;
+
+    lead.siteVisits = dedupeSiteVisitsArray(lead.siteVisits);
+    syncLeadSiteVisitPointer(lead);
+    lead.markModified('siteVisits');
+    lead.markModified('siteVisit');
 
     // Auto-update status
     if (lead.status === 'site_visit_scheduled') {
@@ -3696,6 +3841,7 @@ router.put('/:id/site-visit/complete', auth, checkModulePermission('leads', 'edi
     const updatedLead = await Lead.findById(lead._id)
       .populate('siteVisit.relationshipManager', 'firstName lastName')
       .populate('siteVisit.property', 'title slug')
+      .populate('siteVisits.property', 'title slug')
       .populate('property', 'title slug')
       .populate('agency', 'name')
       .populate('assignedAgent', 'firstName lastName email phone');
@@ -3895,17 +4041,38 @@ router.put('/:id/site-visit/:visitId', auth, checkModulePermission('leads', 'edi
 });
 
 // @route   PUT /api/leads/:id/site-visit/:visitId/completion
-// @desc    Update completion remarks (feedback, interestLevel, nextAction) for a completed visit
+// @desc    Update completion remarks (and optional photo) for a completed visit
 // @access  Private
-router.put('/:id/site-visit/:visitId/completion', auth, checkModulePermission('leads', 'edit'), [
+router.put('/:id/site-visit/:visitId/completion', auth, checkModulePermission('leads', 'edit'), (req, res, next) => {
+  siteVisitPhotoUpload.single('photo')(req, res, (err) => {
+    if (err instanceof multer.MulterError) {
+      if (err.code === 'LIMIT_FILE_SIZE') {
+        return res.status(400).json({ message: 'Photo is too large. Please try another image.' });
+      }
+      return res.status(400).json({ message: err.message });
+    }
+    if (err) return res.status(400).json({ message: err.message });
+    next();
+  });
+}, [
   body('feedback').optional().trim(),
   body('interestLevel').optional({ checkFalsy: true }).trim().isIn(['high', 'medium', 'low', 'not_interested']).withMessage('interestLevel must be one of: high, medium, low, not_interested'),
-  body('nextAction').optional().trim()
+  body('nextAction').optional().trim(),
+  body('removePhoto').optional()
 ], async (req, res) => {
   try {
     const errors = validationResult(req);
     if (!errors.isEmpty()) {
       return res.status(400).json({ errors: errors.array(), message: errors.array().map(e => e.msg).join(', ') });
+    }
+
+    let completionPhotoPath = null;
+    if (req.file && req.file.buffer) {
+      const uploadsDir = path.join('uploads', 'site-visits');
+      const filename = `visit-${req.params.id}-${Date.now()}.jpg`;
+      const destPath = path.join(uploadsDir, filename);
+      await compressImageToJpeg(req.file.buffer, destPath);
+      completionPhotoPath = `uploads/site-visits/${filename}`.replace(/\\/g, '/');
     }
 
     const lead = await Lead.findById(req.params.id);
@@ -3933,6 +4100,31 @@ router.put('/:id/site-visit/:visitId/completion', auth, checkModulePermission('l
     if (req.body.interestLevel) visit.interestLevel = req.body.interestLevel;
     if (req.body.nextAction !== undefined) visit.nextAction = req.body.nextAction;
 
+    const removePhoto = req.body.removePhoto === true || req.body.removePhoto === 'true';
+    if (completionPhotoPath) {
+      visit.completionPhoto = completionPhotoPath;
+    } else if (removePhoto) {
+      visit.completionPhoto = undefined;
+    }
+
+    const visitIdStr = visitId.toString();
+    if (lead.siteVisits && Array.isArray(lead.siteVisits)) {
+      const idx = lead.siteVisits.findIndex((v) => v._id && v._id.toString() === visitIdStr);
+      if (idx !== -1) {
+        if (req.body.feedback !== undefined) lead.siteVisits[idx].feedback = req.body.feedback;
+        if (req.body.interestLevel) lead.siteVisits[idx].interestLevel = req.body.interestLevel;
+        if (req.body.nextAction !== undefined) lead.siteVisits[idx].nextAction = req.body.nextAction;
+        if (completionPhotoPath) lead.siteVisits[idx].completionPhoto = completionPhotoPath;
+        else if (removePhoto) lead.siteVisits[idx].completionPhoto = undefined;
+      }
+    }
+    if (lead.siteVisit && lead.siteVisit._id && lead.siteVisit._id.toString() === visitIdStr) {
+      if (completionPhotoPath) lead.siteVisit.completionPhoto = completionPhotoPath;
+      else if (removePhoto) lead.siteVisit.completionPhoto = undefined;
+    }
+
+    lead.markModified('siteVisits');
+    lead.markModified('siteVisit');
     await lead.save();
 
     const updatedLead = await Lead.findById(lead._id)
@@ -3960,62 +4152,39 @@ router.delete('/:id/site-visit/:visitId', auth, checkModulePermission('leads', '
       return res.status(404).json({ message: 'Lead not found' });
     }
 
-    const visitId = req.params.visitId;
+    const visitId = String(req.params.visitId).trim();
     if (!lead.siteVisits || !Array.isArray(lead.siteVisits)) {
-      // Backward compat: if only single siteVisit exists, treat as one visit
-      if (lead.siteVisit && lead.siteVisit.scheduledDate) {
-        lead.siteVisit.status = 'cancelled';
-        lead.siteVisit.cancelledDate = new Date();
-        lead.siteVisits = [];
-        lead.activityLog.push({
-          action: 'site_visit_cancelled',
-          details: { description: `Site visit scheduled for ${new Date(lead.siteVisit.scheduledDate).toLocaleDateString()} at ${lead.siteVisit.scheduledTime} was cancelled` },
-          performedBy: req.user.id
-        });
-        await lead.save();
-        const updatedLead = await Lead.findById(lead._id)
-          .populate('siteVisit.relationshipManager', 'firstName lastName email phone')
-          .populate('siteVisit.property', 'title slug')
-          .populate('property', 'title slug')
-          .populate('agency', 'name')
-          .populate('assignedAgent', 'firstName lastName email phone');
-        try {
-          const User = require('../models/User');
-          const Agency = require('../models/Agency');
-          const Property = require('../models/Property');
-          const agency = await Agency.findById(lead.agency);
-          const leadForCancel = await Lead.findById(lead._id)
-            .populate({ path: 'siteVisit.property', populate: { path: 'agent', select: 'firstName lastName email phone' } })
-            .populate({ path: 'property', populate: { path: 'agent', select: 'firstName lastName email phone' } });
-          if (leadForCancel.contact?.email) await emailService.sendSiteVisitCancellationToCustomer(leadForCancel, agency);
-          if (updatedLead.assignedAgent) {
-            const assignedAgent = await User.findById(updatedLead.assignedAgent);
-            if (assignedAgent?.email) await emailService.sendSiteVisitCancellationToAgent(leadForCancel, assignedAgent, agency);
-          }
-          const propertyAgent = leadForCancel.siteVisit?.property?.agent || leadForCancel.property?.agent;
-          if (propertyAgent?.email) await emailService.sendSiteVisitNotificationToPropertyAgent(leadForCancel, propertyAgent, agency, 'cancelled');
-        } catch (cancelEmailErr) {
-          console.error('Error sending site visit cancellation emails:', cancelEmailErr);
-        }
-        return res.json({ lead: updatedLead });
-      }
-      return res.status(400).json({ message: 'No site visit found to delete' });
+      lead.siteVisits = [];
     }
 
-    const index = lead.siteVisits.findIndex(v => v._id && v._id.toString() === visitId);
-    if (index === -1) {
+    let visitToRemove = lead.siteVisits.find((v) => v._id && v._id.toString() === visitId);
+    if (!visitToRemove && lead.siteVisit && lead.siteVisit._id && lead.siteVisit._id.toString() === visitId) {
+      visitToRemove = lead.siteVisit;
+    }
+    if (!visitToRemove) {
       return res.status(404).json({ message: 'Site visit not found' });
     }
 
-    const removed = lead.siteVisits[index];
-    lead.siteVisits.splice(index, 1);
-    if (lead.siteVisit && lead.siteVisit._id && lead.siteVisit._id.toString() === visitId) {
-      lead.siteVisit = lead.siteVisits.length > 0 ? lead.siteVisits[lead.siteVisits.length - 1] : undefined;
-    } else if (lead.siteVisits.length > 0 && !lead.siteVisit) {
-      lead.siteVisit = lead.siteVisits[lead.siteVisits.length - 1];
-    } else if (lead.siteVisits.length === 0) {
+    const removed = visitToRemove;
+
+    // Remove every array entry for this visit (duplicate subdocs may use different _ids)
+    lead.siteVisits = lead.siteVisits.filter(
+      (v) => !(v._id && v._id.toString() === visitId) && !siteVisitsMatch(v, visitToRemove)
+    );
+
+    if (
+      lead.siteVisit &&
+      ((lead.siteVisit._id && lead.siteVisit._id.toString() === visitId) ||
+        siteVisitsMatch(lead.siteVisit, visitToRemove))
+    ) {
       lead.siteVisit = undefined;
     }
+
+    lead.siteVisits = dedupeSiteVisitsArray(lead.siteVisits);
+    syncLeadSiteVisitPointer(lead);
+
+    lead.markModified('siteVisits');
+    lead.markModified('siteVisit');
 
     lead.activityLog.push({
       action: 'site_visit_cancelled',

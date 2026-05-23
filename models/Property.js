@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+﻿const mongoose = require('mongoose');
 const { isPostalDigitsOrEmpty, POSTAL_DIGITS_VALIDATION_MESSAGE } = require('../utils/postalCode');
 
 const ALPHA_TEXT_REGEX = /^[A-Za-z\s.'-]+$/;
@@ -28,8 +28,14 @@ const propertySchema = new mongoose.Schema({
   },
   propertyType: {
     type: String,
-    enum: ['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'off_plan', 'ready_to_move', 'under_construction', 'other'],
-    required: [true, 'Property type is required']
+    required: [true, 'Property type is required'],
+    trim: true,
+    lowercase: true
+  },
+  completionStatus: {
+    type: String,
+    enum: ['off_plan', 'under_construction', 'ready_to_move', null],
+    default: null
   },
   listingType: {
     type: String,

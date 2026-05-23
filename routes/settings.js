@@ -359,6 +359,75 @@ router.delete('/amenities/:id', auth, checkModulePermission('settings', 'delete'
   }
 });
 
+// ==================== PROPERTY TYPES ====================
+
+const PropertyType = require('../models/PropertyType');
+const { ensureDefaultPropertyTypes } = require('../utils/propertyTypeValidation');
+
+// @route   GET /api/settings/property-types
+// @desc    Get all property types (for dropdowns and settings)
+// @access  Public (optional auth)
+router.get('/property-types', optionalAuth, async (req, res) => {
+  try {
+    await ensureDefaultPropertyTypes();
+    const filter = {};
+    if (!req.user || (req.user.role !== 'super_admin' && req.user.role !== 'agency_admin' && req.user.role !== 'staff')) {
+      filter.isActive = true;
+    }
+    const propertyTypes = await PropertyType.find(filter).sort('order name');
+    res.json({ propertyTypes });
+  } catch (error) {
+    console.error('Get property types error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.post('/property-types', auth, checkModulePermission('settings', 'create'), [
+  body('name').trim().notEmpty().withMessage('Property type name is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+    const propertyType = new PropertyType(req.body);
+    await propertyType.save();
+    res.status(201).json({ propertyType });
+  } catch (error) {
+    console.error('Create property type error:', error);
+    res.status(500).json({ message: error.code === 11000 ? 'Property type already exists' : 'Server error' });
+  }
+});
+
+router.put('/property-types/:id', auth, checkModulePermission('settings', 'edit'), async (req, res) => {
+  try {
+    const propertyType = await PropertyType.findById(req.params.id);
+    if (!propertyType) {
+      return res.status(404).json({ message: 'Property type not found' });
+    }
+    Object.assign(propertyType, req.body);
+    await propertyType.save();
+    res.json({ propertyType });
+  } catch (error) {
+    console.error('Update property type error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+router.delete('/property-types/:id', auth, checkModulePermission('settings', 'delete'), async (req, res) => {
+  try {
+    const propertyType = await PropertyType.findById(req.params.id);
+    if (!propertyType) {
+      return res.status(404).json({ message: 'Property type not found' });
+    }
+    await propertyType.deleteOne();
+    res.json({ message: 'Property type deleted successfully' });
+  } catch (error) {
+    console.error('Delete property type error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // ==================== LOCATIONS ====================
 
 // @route   GET /api/settings/locations

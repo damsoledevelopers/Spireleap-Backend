@@ -9,8 +9,23 @@ const emailService = require('../services/emailService');
 const Lead = require('../models/Lead');
 const Transaction = require('../models/Transaction');
 const activityService = require('../services/activityService');
+const PropertyType = require('../models/PropertyType');
+const { ensureDefaultPropertyTypes, isValidPropertyTypeSlug } = require('../utils/propertyTypeValidation');
 
 const router = express.Router();
+
+const COMPLETION_STATUS_VALUES = ['off_plan', 'under_construction', 'ready_to_move'];
+const LEGACY_COMPLETION_AS_PROPERTY_TYPE = ['off_plan', 'ready_to_move', 'under_construction'];
+
+function normalizePropertyRecord(property) {
+  const obj = property?.toObject ? property.toObject() : { ...property };
+  if (!obj) return obj;
+  if (!obj.completionStatus && LEGACY_COMPLETION_AS_PROPERTY_TYPE.includes(obj.propertyType)) {
+    obj.completionStatus = obj.propertyType;
+    obj.propertyType = 'other';
+  }
+  return obj;
+}
 
 // @route   GET /api/properties/filter-options
 // @desc    Get dropdown options for property search filters
@@ -24,8 +39,11 @@ router.get('/filter-options', optionalAuth, async (req, res) => {
     const Settings = require('../models/Settings');
     const defaultSpokenLanguages = ['English', 'Arabic', 'Hindi', 'Urdu', 'French', 'Spanish', 'German'];
 
+    await ensureDefaultPropertyTypes();
+
     const [
-      propertyTypes,
+      propertyTypesFromDb,
+      completionStatuses,
       listingTypes,
       cities,
       states,
@@ -39,7 +57,8 @@ router.get('/filter-options', optionalAuth, async (req, res) => {
       cmsLocations,
       spokenSetting
     ] = await Promise.all([
-      Property.distinct('propertyType', {}),
+      PropertyType.find({ isActive: true }).select('slug name order').sort({ order: 1, name: 1 }).lean(),
+      Property.distinct('completionStatus', { completionStatus: { $ne: null } }),
       Property.distinct('listingType', {}),
       Property.distinct('location.city', {}),
       Property.distinct('location.state', {}),
@@ -115,10 +134,19 @@ router.get('/filter-options', optionalAuth, async (req, res) => {
       }))
     };
 
-    const defaultPropertyTypes = ['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'off_plan', 'ready_to_move', 'under_construction', 'other'];
     const defaultListingTypes = ['sale', 'rent', 'both'];
 
-    const safePropertyTypes = uniqSortedStrings(propertyTypes);
+    const propertyTypeSlugs = (propertyTypesFromDb || []).map((t) => t.slug).filter(Boolean);
+    const safePropertyTypes = uniqSortedStrings([
+      ...propertyTypeSlugs,
+      ...uniqSortedStrings(await Property.distinct('propertyType', {})).filter(
+        (t) => !LEGACY_COMPLETION_AS_PROPERTY_TYPE.includes(t)
+      )
+    ]);
+    const safeCompletionStatuses = uniqSortedStrings([
+      ...COMPLETION_STATUS_VALUES,
+      ...(completionStatuses || [])
+    ]);
     const safeListingTypes = uniqSortedStrings(listingTypes);
 
     const mergeWithDefaults = (defaults, fromDb) => {
@@ -129,7 +157,16 @@ router.get('/filter-options', optionalAuth, async (req, res) => {
     };
 
     res.json({
-      propertyTypes: mergeWithDefaults(defaultPropertyTypes, safePropertyTypes),
+      propertyTypes: safePropertyTypes,
+      propertyTypeOptions: (propertyTypesFromDb || []).map((t) => ({
+        value: t.slug,
+        label: t.name || t.slug
+      })),
+      completionStatuses: safeCompletionStatuses,
+      completionStatusOptions: safeCompletionStatuses.map((value) => ({
+        value,
+        label: value.split('_').map((w) => w.charAt(0).toUpperCase() + w.slice(1)).join(' ')
+      })),
       listingTypes: mergeWithDefaults(defaultListingTypes, safeListingTypes),
       locations: {
         cities: uniqSortedStrings([...(cities || []), ...cmsCities]),
@@ -160,6 +197,7 @@ router.get('/', optionalAuth, [
     return statuses.every(s => validStatuses.includes(s));
   }),
   query('propertyType').optional(),
+  query('completionStatus').optional().isIn(COMPLETION_STATUS_VALUES),
   query('listingType').optional().isIn(['sale', 'rent', 'both']),
   query('city').optional(),
   query('state').optional(),
@@ -241,6 +279,19 @@ router.get('/', optionalAuth, [
     // If user is authenticated and no status filter, show all statuses (no status filter applied)
     if (req.query.propertyType) {
       filter.propertyType = req.query.propertyType;
+    }
+    if (req.query.completionStatus) {
+      const cs = req.query.completionStatus;
+      const completionClause = {
+        $or: [
+          { completionStatus: cs },
+          ...(LEGACY_COMPLETION_AS_PROPERTY_TYPE.includes(cs)
+            ? [{ propertyType: cs, $or: [{ completionStatus: null }, { completionStatus: { $exists: false } }] }]
+            : [])
+        ]
+      };
+      if (!filter.$and) filter.$and = [];
+      filter.$and.push(completionClause);
     }
     if (req.query.listingType) {
       filter.listingType = req.query.listingType;
@@ -1089,7 +1140,8 @@ router.post('/', [
   checkModulePermission('properties', 'create'),
   body('title').optional({ values: 'falsy' }).trim(),
   body('description').optional({ values: 'falsy' }).trim(),
-  body('propertyType').isIn(['apartment', 'house', 'villa', 'condo', 'townhouse', 'land', 'commercial', 'office', 'retail', 'warehouse', 'off_plan', 'ready_to_move', 'under_construction', 'other']).withMessage('Invalid property type'),
+  body('propertyType').trim().notEmpty().withMessage('Property type is required'),
+  body('completionStatus').optional({ nullable: true }).isIn([...COMPLETION_STATUS_VALUES, '', null]).withMessage('Invalid completion status'),
   body('listingType').isIn(['sale', 'rent', 'both']).withMessage('Invalid listing type'),
   body('location.address').optional({ values: 'falsy' }).trim(),
   body('location.city').optional({ values: 'falsy' }).trim(),
@@ -1156,6 +1208,15 @@ router.post('/', [
       console.error('=== Validation Errors ===');
       console.error(JSON.stringify(errors.array(), null, 2));
       return res.status(400).json({ errors: errors.array() });
+    }
+
+    if (!(await isValidPropertyTypeSlug(req.body.propertyType))) {
+      return res.status(400).json({ message: 'Invalid property type' });
+    }
+    if (req.body.completionStatus === '' || req.body.completionStatus === undefined) {
+      req.body.completionStatus = null;
+    } else if (req.body.completionStatus && !COMPLETION_STATUS_VALUES.includes(req.body.completionStatus)) {
+      return res.status(400).json({ message: 'Invalid completion status' });
     }
 
     if (req.user.role === 'agency_admin' && req.body.agency && req.body.agency !== req.user.agency) {
@@ -1412,6 +1473,21 @@ router.put('/:id', [
     if (req.body.category === '' || req.body.category == null) delete req.body.category;
     if (!Array.isArray(req.body.amenities)) req.body.amenities = [];
     req.body.tags = Array.isArray(req.body.tags) ? req.body.tags.filter(Boolean) : [];
+
+    if (req.body.propertyType !== undefined) {
+      if (!(await isValidPropertyTypeSlug(req.body.propertyType))) {
+        return res.status(400).json({ message: 'Invalid property type' });
+      }
+    }
+    if (req.body.completionStatus === '') {
+      req.body.completionStatus = null;
+    } else if (
+      req.body.completionStatus !== undefined &&
+      req.body.completionStatus !== null &&
+      !COMPLETION_STATUS_VALUES.includes(req.body.completionStatus)
+    ) {
+      return res.status(400).json({ message: 'Invalid completion status' });
+    }
 
     // Capture old state for status change notifications
     const oldStatus = property.status;
