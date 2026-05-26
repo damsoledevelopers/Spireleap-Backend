@@ -932,7 +932,7 @@ ${v.agencyName} Team
       return result;
     } catch (error) {
       console.error('Error sending contact agent request email:', error);
-      throw error;
+      return null;
     }
   }
 

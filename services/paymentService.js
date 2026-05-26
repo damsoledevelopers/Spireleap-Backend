@@ -1,9 +1,28 @@
 const Razorpay = require('razorpay');
 const stripe = require('stripe');
 const PDFDocument = require('pdfkit');
+const path = require('path');
+const fs = require('fs');
 const Payment = require('../models/Payment');
 const Transaction = require('../models/Transaction');
 const Lead = require('../models/Lead');
+
+/** Same logo as customer sidebar (`/NovaKeys.png`) */
+function resolveNovaKeysLogoPath() {
+  const candidates = [
+    path.join(__dirname, '../assets/NovaKeys.png'),
+    path.join(__dirname, '../../Spireleap-frontend/public/NovaKeys.png'),
+    path.join(__dirname, '../public/NovaKeys.png')
+  ];
+  for (const candidate of candidates) {
+    try {
+      if (fs.existsSync(candidate)) return candidate;
+    } catch (_) {
+      /* ignore */
+    }
+  }
+  return null;
+}
 
 class PaymentService {
   constructor() {
@@ -322,27 +341,43 @@ class PaymentService {
       const agency = payment.agency;
 
       const doc = new PDFDocument({ margin: 50, size: 'A4' });
-      const path = require('path');
-      const fs = require('fs');
       const pageWidth = doc.page.width - 100;
       const left = 50;
       const GRAY_400 = '#9ca3af';
       const GRAY_700 = '#374151';
       const GRAY_900 = '#111827';
+      const BRAND_MAROON = '#700E08';
 
       let y = 50;
 
-      // 1. Simple NovaKeys logo at top
-      const logoPath = path.join(__dirname, '../..', 'Spireleap-frontend/public/Novakeys.png');
-      if (fs.existsSync(logoPath)) {
-        doc.image(logoPath, left, y, { width: 56, height: 56 });
-        doc.fontSize(18).fillColor(GRAY_900).text('NovaKeys', left + 65, y + 16);
+      const logoPath = resolveNovaKeysLogoPath();
+      if (logoPath) {
+        doc.image(logoPath, left, y, { width: 48, height: 48, fit: [48, 48] });
+        doc
+          .fillColor(BRAND_MAROON)
+          .font('Helvetica-Bold')
+          .fontSize(15)
+          .text('NOVA KEYS', left + 58, y + 8);
+        doc
+          .fillColor(GRAY_700)
+          .font('Helvetica')
+          .fontSize(9)
+          .text('Real Estate', left + 58, y + 28);
       } else {
-        doc.rect(left, y, 56, 56).fillAndStroke('#700E08', '#700E08');
-        doc.fillColor('#ffffff').fontSize(24).text('N', left + 18, y + 18, { width: 24, align: 'center' });
-        doc.fillColor(GRAY_900).fontSize(18).text('NovaKeys', left + 65, y + 16);
+        doc.rect(left, y, 48, 48).fillAndStroke(BRAND_MAROON, BRAND_MAROON);
+        doc.fillColor('#ffffff').fontSize(22).text('N', left + 16, y + 12, { width: 20, align: 'center' });
+        doc
+          .fillColor(BRAND_MAROON)
+          .font('Helvetica-Bold')
+          .fontSize(15)
+          .text('NOVA KEYS', left + 58, y + 8);
+        doc
+          .fillColor(GRAY_700)
+          .font('Helvetica')
+          .fontSize(9)
+          .text('Real Estate', left + 58, y + 28);
       }
-      y += 70;
+      y += 62;
 
       // 2. Customer details
       doc.fontSize(10).fillColor(GRAY_400).text('Customer', left, y);

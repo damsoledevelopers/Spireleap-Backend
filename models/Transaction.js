@@ -1,4 +1,4 @@
-const mongoose = require('mongoose');
+﻿const mongoose = require('mongoose');
 
 const transactionSchema = new mongoose.Schema({
   property: {
@@ -48,8 +48,16 @@ const transactionSchema = new mongoose.Schema({
   },
   status: {
     type: String,
-    enum: ['pending', 'completed', 'cancelled', 'refunded'],
-    default: 'pending'
+    enum: [
+      'pending_approval',
+      'approved',
+      'pending',
+      'completed',
+      'cancelled',
+      'rejected',
+      'refunded'
+    ],
+    default: 'pending_approval'
   },
   transactionDate: {
     type: Date,
@@ -63,17 +71,35 @@ const transactionSchema = new mongoose.Schema({
   documents: [{
     name: String,
     url: String,
+    filename: String,
+    mimeType: String,
+    uploadedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    },
+    uploadedAt: {
+      type: Date,
+      default: Date.now
+    },
     type: {
       type: String,
-      enum: ['contract', 'receipt', 'invoice', 'other']
+      enum: ['contract', 'receipt', 'invoice', 'proof', 'other'],
+      default: 'proof'
     }
   }],
+  approval: {
+    reviewedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    },
+    reviewedAt: Date,
+    adminNote: String
+  },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,
     ref: 'User',
     required: true
   },
-  // ERP Integration
   erpSync: [{
     erpSystem: {
       type: String,
@@ -91,7 +117,7 @@ const transactionSchema = new mongoose.Schema({
     default: false
   },
   paymentDetails: {
-    amountPaid: Number,
+    amountPaid: { type: Number, default: 0 },
     dueAmount: Number,
     paymentDate: Date,
     paymentMethod: String,
@@ -101,7 +127,6 @@ const transactionSchema = new mongoose.Schema({
   timestamps: true
 });
 
-// Indexes
 transactionSchema.index({ property: 1 });
 transactionSchema.index({ lead: 1 });
 transactionSchema.index({ agency: 1 });
@@ -110,4 +135,3 @@ transactionSchema.index({ status: 1 });
 transactionSchema.index({ transactionDate: 1 });
 
 module.exports = mongoose.model('Transaction', transactionSchema);
-

@@ -12,6 +12,82 @@ const User = require('../models/User');
 const notificationService = require('../services/notificationService');
 const emailService = require('../services/emailService');
 const paymentService = require('../services/paymentService');
+const encryptionService = require('../services/encryptionService');
+const multer = require('multer');
+const path = require('path');
+const fs = require('fs');
+const {
+  enrichTransactionPaymentSummary,
+  getAmountPaid,
+  getPendingAmount,
+  isBookingAwaitingApproval,
+  canCustomerUploadProof,
+} = require('../utils/transactionBooking');
+const { findLeadsByCustomerEmail } = require('../utils/leadCustomerQuery');
+const { getFileUrl } = require('../middleware/upload');
+
+const TRANSACTION_STATUSES = [
+  'pending_approval',
+  'approved',
+  'pending',
+  'completed',
+  'cancelled',
+  'rejected',
+  'refunded'
+];
+
+async function getCustomerLeadIds(userEmail) {
+  const leads = await findLeadsByCustomerEmail(userEmail, []);
+  return leads.map((l) => l._id);
+}
+
+async function assertCustomerOwnsTransaction(transactionId, userEmail) {
+  const leadIds = await getCustomerLeadIds(userEmail);
+  if (!leadIds.length) return null;
+  const transaction = await Transaction.findOne({
+    _id: transactionId,
+    lead: { $in: leadIds }
+  });
+  return transaction;
+}
+
+const bookingProofStorage = multer.diskStorage({
+  destination: (req, file, cb) => {
+    const uploadPath = 'uploads/transactions/proofs';
+    if (!fs.existsSync(uploadPath)) {
+      fs.mkdirSync(uploadPath, { recursive: true });
+    }
+    cb(null, uploadPath);
+  },
+  filename: (req, file, cb) => {
+    const uniqueSuffix = Date.now() + '-' + Math.round(Math.random() * 1e9);
+    const ext = path.extname(file.originalname);
+    const name = path.basename(file.originalname, ext);
+    cb(null, `${name}-${uniqueSuffix}${ext}`);
+  }
+});
+
+const bookingProofFilter = (req, file, cb) => {
+  const allowed = [
+    'image/jpeg',
+    'image/jpg',
+    'image/png',
+    'image/gif',
+    'image/webp',
+    'application/pdf'
+  ];
+  if (allowed.includes(file.mimetype)) {
+    cb(null, true);
+  } else {
+    cb(new Error('Only PDF or image files (JPG, PNG, WEBP) are allowed'), false);
+  }
+};
+
+const uploadBookingProof = multer({
+  storage: bookingProofStorage,
+  fileFilter: bookingProofFilter,
+  limits: { fileSize: 10 * 1024 * 1024 }
+}).single('proof');
 
 // @route   GET /api/transactions/analytics/revenue
 // @desc    Get revenue analytics
@@ -216,8 +292,7 @@ router.get('/my-transactions', auth, async (req, res) => {
 
     // Find leads for this customer by email
     // We use a simple find().select() instead of distinct() to be safer
-    const leads = await LeadModel.find({ 'contact.email': userEmail }).select('_id');
-    const customerLeadIds = leads.map(l => l._id);
+    const customerLeadIds = await getCustomerLeadIds(userEmail);
 
     if (!customerLeadIds || customerLeadIds.length === 0) {
       return res.json([]);
@@ -248,10 +323,10 @@ router.get('/my-transactions', auth, async (req, res) => {
     // Combine transactions with their payment info
     const transactionsWithPayments = transactions.map(t => {
       const payment = payments.find(p => p.transaction.toString() === t._id.toString());
-      return {
+      return enrichTransactionPaymentSummary({
         ...t.toObject(),
         payment
-      };
+      });
     });
 
     res.json(transactionsWithPayments);
@@ -467,13 +542,336 @@ router.post('/', [
   }
 });
 
+// @route   POST /api/transactions/my-transactions/:id/booking-proof
+// @desc    Customer uploads booking proof (PDF or image)
+// @access  Private (Customer)
+router.post('/my-transactions/:id/booking-proof', auth, (req, res) => {
+  uploadBookingProof(req, res, async (err) => {
+    try {
+      if (err instanceof multer.MulterError) {
+        return res.status(400).json({ message: err.message });
+      }
+      if (err) {
+        return res.status(400).json({ message: err.message });
+      }
+      if (!req.file) {
+        return res.status(400).json({ message: 'Please upload a PDF or image file' });
+      }
+
+      const userEmail = req.user?.email;
+      const transaction = await assertCustomerOwnsTransaction(req.params.id, userEmail);
+      if (!transaction) {
+        return res.status(404).json({ message: 'Booking not found' });
+      }
+
+      if (!canCustomerUploadProof(transaction)) {
+        return res.status(400).json({
+          message:
+            transaction.status === 'approved'
+              ? 'No balance due on this booking, or it is not awaiting payment proof.'
+              : `Cannot upload proof when booking status is "${transaction.status}"`
+        });
+      }
+
+      const wasApproved = transaction.status === 'approved';
+      const fileUrl = getFileUrl(req, req.file.path);
+      const proofDoc = {
+        name: req.file.originalname,
+        url: fileUrl,
+        filename: req.file.filename,
+        mimeType: req.file.mimetype,
+        type: 'proof',
+        uploadedBy: req.user.id,
+        uploadedAt: new Date()
+      };
+
+      transaction.documents = [...(transaction.documents || []), proofDoc];
+      transaction.customerConfirmed = true;
+      if (wasApproved) {
+        transaction.status = 'pending_approval';
+        transaction.notes = [transaction.notes, 'Customer submitted payment proof for review.']
+          .filter(Boolean)
+          .join('\n');
+      }
+      await transaction.save();
+
+      const populated = await Transaction.findById(transaction._id)
+        .populate('property', 'title slug images')
+        .populate('agency', 'name logo')
+        .populate('agent', 'firstName lastName email');
+
+      res.json({
+        message: wasApproved
+          ? 'Payment proof uploaded. Admin will verify and update your balance.'
+          : 'Proof uploaded. Admin will review your booking request.',
+        transaction: enrichTransactionPaymentSummary(populated)
+      });
+    } catch (error) {
+      console.error('Upload booking proof error:', error);
+      res.status(500).json({ message: 'Server error' });
+    }
+  });
+});
+
+// @route   POST /api/transactions/:id/approve
+// @desc    Admin approves a booking request
+// @access  Private
+router.post('/:id/approve', [
+  auth,
+  checkModulePermission('leads', 'edit'),
+  body('adminNote').optional().trim(),
+  body('amountPaid')
+    .optional({ values: 'null' })
+    .custom((val) => {
+      if (val === null || val === undefined || val === '') return true;
+      const n = Number(val);
+      if (!Number.isFinite(n) || n < 0) {
+        throw new Error('Payment amount must be a valid number (0 or greater).');
+      }
+      return true;
+    })
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      const messages = errors.array().map((e) => e.msg || 'Invalid input');
+      return res.status(400).json({
+        message: messages.join(' '),
+        errors: errors.array()
+      });
+    }
+
+    const transaction = await Transaction.findById(req.params.id);
+    if (!transaction) {
+      return res.status(404).json({ message: 'Transaction not found' });
+    }
+
+    if (req.user.role === 'agency_admin' && transaction.agency.toString() !== req.user.agency) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    if (!isBookingAwaitingApproval(transaction.status)) {
+      return res.status(400).json({
+        message: `Only pending booking requests can be approved (current: ${transaction.status})`
+      });
+    }
+
+    const hasProof = (transaction.documents || []).some((d) => d.url);
+    if (!hasProof) {
+      return res.status(400).json({
+        message: 'Customer must upload a proof document (PDF or image) before approval'
+      });
+    }
+
+    const total = Number(transaction.amount || 0);
+    const existingPaid = getAmountPaid(transaction);
+    const paymentInput =
+      req.body.amountPaid !== undefined && req.body.amountPaid !== null && req.body.amountPaid !== ''
+        ? Number(req.body.amountPaid)
+        : null;
+
+    let paid = existingPaid;
+    if (paymentInput !== null && !Number.isNaN(paymentInput)) {
+      if (existingPaid > 0) {
+        paid = Math.min(total, existingPaid + paymentInput);
+      } else {
+        paid = Math.min(total, paymentInput);
+      }
+    }
+
+    const pending = Math.max(0, total - paid);
+
+    transaction.approval = {
+      reviewedBy: req.user.id,
+      reviewedAt: new Date(),
+      adminNote: req.body.adminNote || transaction.approval?.adminNote || ''
+    };
+    transaction.paymentDetails = {
+      ...(transaction.paymentDetails || {}),
+      amountPaid: paid,
+      dueAmount: pending,
+      paymentDate: paymentInput !== null && paymentInput > 0 ? new Date() : transaction.paymentDetails?.paymentDate
+    };
+
+    if (pending <= 0) {
+      transaction.status = 'completed';
+      const property = await Property.findById(transaction.property);
+      if (property) {
+        property.status = transaction.type === 'rent' ? 'rented' : 'sold';
+        await property.save();
+      }
+      const lead = await Lead.findById(transaction.lead);
+      if (lead) {
+        lead.status = 'booked';
+        lead.convertedAt = new Date();
+        await lead.save();
+      }
+    } else {
+      transaction.status = 'approved';
+    }
+
+    await transaction.save();
+
+    const populated = await Transaction.findById(transaction._id)
+      .populate('property', 'title slug')
+      .populate('lead')
+      .populate('agency', 'name')
+      .populate('agent', 'firstName lastName email')
+      .populate('approval.reviewedBy', 'firstName lastName');
+
+    res.json({
+      message: pending <= 0 ? 'Booking approved and fully paid' : 'Booking approved',
+      transaction: enrichTransactionPaymentSummary(populated)
+    });
+  } catch (error) {
+    console.error('Approve booking error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   POST /api/transactions/:id/reject
+// @desc    Admin rejects a booking request
+// @access  Private
+router.post('/:id/reject', [
+  auth,
+  checkModulePermission('leads', 'edit'),
+  body('adminNote').trim().notEmpty().withMessage('Rejection note is required')
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const transaction = await Transaction.findById(req.params.id);
+    if (!transaction) {
+      return res.status(404).json({ message: 'Transaction not found' });
+    }
+
+    if (req.user.role === 'agency_admin' && transaction.agency.toString() !== req.user.agency) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    if (!isBookingAwaitingApproval(transaction.status)) {
+      return res.status(400).json({
+        message: `Only pending booking requests can be rejected (current: ${transaction.status})`
+      });
+    }
+
+    transaction.status = 'rejected';
+    transaction.approval = {
+      reviewedBy: req.user.id,
+      reviewedAt: new Date(),
+      adminNote: req.body.adminNote
+    };
+    await transaction.save();
+
+    const populated = await Transaction.findById(transaction._id)
+      .populate('property', 'title slug')
+      .populate('agency', 'name')
+      .populate('agent', 'firstName lastName email');
+
+    res.json({
+      message: 'Booking rejected',
+      transaction: enrichTransactionPaymentSummary(populated)
+    });
+  } catch (error) {
+    console.error('Reject booking error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   POST /api/transactions/:id/record-payment
+// @desc    Record partial or full payment on an approved booking
+// @access  Private
+router.post('/:id/record-payment', [
+  auth,
+  checkModulePermission('leads', 'edit'),
+  body('amount').isFloat({ min: 0.01 }).withMessage('Payment amount is required'),
+  body('paymentMethod').optional().trim(),
+  body('transactionReference').optional().trim(),
+  body('adminNote').optional().trim()
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({ errors: errors.array() });
+    }
+
+    const transaction = await Transaction.findById(req.params.id);
+    if (!transaction) {
+      return res.status(404).json({ message: 'Transaction not found' });
+    }
+
+    if (req.user.role === 'agency_admin' && transaction.agency.toString() !== req.user.agency) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    if (!['approved', 'pending'].includes(transaction.status)) {
+      return res.status(400).json({
+        message: `Payments can only be recorded on approved bookings (current: ${transaction.status})`
+      });
+    }
+
+    const total = Number(transaction.amount || 0);
+    const currentPaid = getAmountPaid(transaction);
+    const addAmount = Number(req.body.amount);
+    const newPaid = Math.min(total, currentPaid + addAmount);
+    const pending = Math.max(0, total - newPaid);
+
+    transaction.paymentDetails = {
+      ...(transaction.paymentDetails || {}),
+      amountPaid: newPaid,
+      dueAmount: pending,
+      paymentDate: new Date(),
+      paymentMethod: req.body.paymentMethod || transaction.paymentDetails?.paymentMethod,
+      transactionReference: req.body.transactionReference || transaction.paymentDetails?.transactionReference
+    };
+
+    if (req.body.adminNote) {
+      transaction.notes = [transaction.notes, req.body.adminNote].filter(Boolean).join('\n');
+    }
+
+    if (pending <= 0) {
+      transaction.status = 'completed';
+      const property = await Property.findById(transaction.property);
+      if (property) {
+        property.status = transaction.type === 'rent' ? 'rented' : 'sold';
+        await property.save();
+      }
+      const lead = await Lead.findById(transaction.lead);
+      if (lead) {
+        lead.status = 'booked';
+        lead.convertedAt = new Date();
+        await lead.save();
+      }
+    }
+
+    await transaction.save();
+
+    const populated = await Transaction.findById(transaction._id)
+      .populate('property', 'title slug')
+      .populate('lead')
+      .populate('agency', 'name')
+      .populate('agent', 'firstName lastName email');
+
+    res.json({
+      message: pending <= 0 ? 'Payment recorded — booking completed' : 'Partial payment recorded',
+      transaction: enrichTransactionPaymentSummary(populated)
+    });
+  } catch (error) {
+    console.error('Record payment error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // @route   PUT /api/transactions/:id
 // @desc    Update transaction
 // @access  Private (Super Admin, Agency Admin)
 router.put('/:id', [
   auth,
   checkModulePermission('leads', 'edit'),
-  body('status').optional().isIn(['pending', 'completed', 'cancelled', 'refunded']),
+  body('status').optional().isIn(TRANSACTION_STATUSES),
   body('amount').optional().isNumeric()
 ], async (req, res) => {
   try {
@@ -650,15 +1048,17 @@ router.post('/my-transactions/:id/confirm', auth, async (req, res) => {
         });
       }
       // If completed but no payment exists for some reason, proceed to create payment (repair mode)
-    } else if (transaction.status === 'pending') {
-      // Normal flow: Customer confirms, but status stays pending until Admin finalizes
+    } else if (isBookingAwaitingApproval(transaction.status)) {
       transaction.customerConfirmed = true;
       transaction.transactionDate = new Date();
       await transaction.save();
-
+    } else if (transaction.status === 'approved') {
+      return res.status(400).json({
+        message: 'Booking already approved. Awaiting payment from admin.'
+      });
     } else {
       return res.status(400).json({
-        message: `Transaction cannot be confirmed. Current status: ${transaction.status}. Only 'pending' transactions can be confirmed.`
+        message: `Transaction cannot be confirmed. Current status: ${transaction.status}.`
       });
     }
 

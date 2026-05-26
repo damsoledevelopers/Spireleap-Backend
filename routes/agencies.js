@@ -11,6 +11,32 @@ const { normalizePhoneToE164 } = require('../utils/phone');
 
 const router = express.Router();
 
+function escapeRegExp(string) {
+  return String(string).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/** Resolve the agency_admin user for an agency (by agency id, then contact email). */
+async function findAgencyAdminForAgency(agencyId, contactEmail) {
+  let admin = await User.findOne({ role: 'agency_admin', agency: agencyId });
+  if (admin) return admin;
+
+  const email = String(contactEmail || '').trim();
+  if (!email) return null;
+
+  admin = await User.findOne({
+    role: 'agency_admin',
+    email: new RegExp(`^${escapeRegExp(email)}$`, 'i')
+  });
+  if (!admin) return null;
+
+  const adminAgencyId = admin.agency ? String(admin.agency) : '';
+  const targetId = String(agencyId);
+  if (!adminAgencyId || adminAgencyId === targetId) {
+    return admin;
+  }
+  return null;
+}
+
 // @route   GET /api/agencies
 // @desc    Get all agencies
 // @access  Private (Super Admin, Agency Admin, Staff)
@@ -61,6 +87,9 @@ router.get('/', auth, checkModulePermission('agencies', 'view'), async (req, res
     }
 
     /** Live counts aligned with Reports (stats.js agencyAnalysis), not cached agency.stats */
+    const { getDefaultAgencyAgentIdStrings } = require('../utils/defaultAgencyAgent');
+    const platformDefaults = await getDefaultAgencyAgentIdStrings();
+
     let responseAgencies = agencies;
     if (agencies.length > 0) {
       const agencyIds = agencies.map((a) => a._id);
@@ -108,6 +137,9 @@ router.get('/', auth, checkModulePermission('agencies', 'view'), async (req, res
           activeProperties: pr.activeProperties || 0,
           totalLeads: ld.totalLeads || 0
         };
+        obj.isPlatformDefault = Boolean(
+          platformDefaults.defaultAgencyId && platformDefaults.defaultAgencyId === id
+        );
         return obj;
       });
     }
@@ -374,6 +406,7 @@ router.put('/:id', auth, checkModulePermission('agencies', 'edit'), async (req, 
     const password = req.body.password;
     const updateData = { ...req.body };
     delete updateData.password;
+    delete updateData.confirmPassword;
 
     if (updateData.name !== undefined && updateData.name !== null && String(updateData.name).trim() !== '') {
       const nameVal = String(updateData.name).trim()
@@ -403,7 +436,6 @@ router.put('/:id', auth, checkModulePermission('agencies', 'edit'), async (req, 
 
     // If password is provided, update the agency admin user's password
     if (password) {
-      // Validate password length
       if (password.length < 6) {
         return res.status(400).json({
           message: 'Password must be at least 6 characters',
@@ -411,19 +443,61 @@ router.put('/:id', auth, checkModulePermission('agencies', 'edit'), async (req, 
         });
       }
 
-      // Find the agency admin user by email
-      const agencyAdmin = await User.findOne({
-        email: agency.contact.email,
-        role: 'agency_admin',
-        agency: agency._id
-      });
+      const contactEmail = agency.contact?.email;
+      if (!contactEmail) {
+        return res.status(400).json({
+          message: 'Agency contact email is required to reset the admin password',
+          errors: [{ msg: 'Contact email is required', path: 'contact.email' }]
+        });
+      }
+
+      let agencyAdmin = await findAgencyAdminForAgency(agency._id, contactEmail);
 
       if (agencyAdmin) {
-        // Update password (will be hashed by pre-save hook)
         agencyAdmin.password = password;
+        agencyAdmin.markModified('password');
+        if (!agencyAdmin.agency) {
+          agencyAdmin.agency = agency._id;
+        }
+        if (agency.contact?.phone) {
+          agencyAdmin.phone = agency.contact.phone;
+        }
+        const normalizedEmail = String(contactEmail).trim().toLowerCase();
+        if (normalizedEmail && agencyAdmin.email.toLowerCase() !== normalizedEmail) {
+          const emailTaken = await User.findOne({
+            email: new RegExp(`^${escapeRegExp(normalizedEmail)}$`, 'i'),
+            _id: { $ne: agencyAdmin._id }
+          });
+          if (emailTaken) {
+            return res.status(400).json({
+              message: 'User already exists with this email',
+              errors: [{ msg: 'Please use a different email address', path: 'contact.email' }]
+            });
+          }
+          agencyAdmin.email = normalizedEmail;
+        }
         await agencyAdmin.save();
       } else {
-        // If no agency admin exists, create one
+        const existingUser = await User.findOne({
+          email: new RegExp(`^${escapeRegExp(String(contactEmail).trim())}$`, 'i')
+        });
+        if (existingUser) {
+          if (existingUser.role === 'agency_admin') {
+            existingUser.agency = agency._id;
+            existingUser.password = password;
+            existingUser.markModified('password');
+            if (agency.contact?.phone) {
+              existingUser.phone = agency.contact.phone;
+            }
+            await existingUser.save();
+          } else {
+            return res.status(400).json({
+              message: 'User already exists with this email',
+              errors: [{ msg: 'An account with this email already exists. Use a different email.', path: 'contact.email' }]
+            });
+          }
+        } else {
+
         const nameParts = agency.name.trim().split(/\s+/);
         const firstName = nameParts[0] || 'Agency';
         const lastName = nameParts.slice(1).join(' ') || 'Admin';
@@ -431,8 +505,8 @@ router.put('/:id', auth, checkModulePermission('agencies', 'edit'), async (req, 
         const newAgencyAdmin = new User({
           firstName,
           lastName,
-          email: agency.contact.email,
-          password: password,
+          email: String(contactEmail).trim().toLowerCase(),
+          password,
           role: 'agency_admin',
           agency: agency._id,
           phone: agency.contact.phone || '',
@@ -441,19 +515,14 @@ router.put('/:id', auth, checkModulePermission('agencies', 'edit'), async (req, 
 
         await newAgencyAdmin.save();
 
-        // Send account creation email with credentials
         try {
-          console.log('📧 Attempting to send new agency admin creation email to:', newAgencyAdmin.email);
           const emailService = require('../services/emailService');
-
-          // Prepare user object with agency data for email
           const adminWithAgency = newAgencyAdmin.toObject();
           adminWithAgency.agency = { name: agency.name };
-
           await emailService.sendAccountCreatedNotification(adminWithAgency, password);
-          console.log('✅ New agency admin creation email sent successfully');
         } catch (emailError) {
-          console.error('❌ Failed to send account creation email:', emailError);
+          console.error('Failed to send account creation email:', emailError);
+        }
         }
       }
     }
@@ -469,6 +538,12 @@ router.put('/:id', auth, checkModulePermission('agencies', 'edit'), async (req, 
     });
   } catch (error) {
     console.error('Update agency error:', error);
+    if (error.code === 11000) {
+      return res.status(400).json({
+        message: 'User already exists with this email',
+        errors: [{ msg: 'Please use a different email address', path: 'contact.email' }]
+      });
+    }
     if (error.name === 'ValidationError') {
       const validationErrors = Object.values(error.errors).map(err => ({
         msg: err.message,
@@ -527,6 +602,14 @@ router.delete('/:id', auth, checkModulePermission('agencies', 'delete'), async (
     const agency = await Agency.findById(req.params.id);
     if (!agency) {
       return res.status(404).json({ message: 'Agency not found' });
+    }
+
+    const { isDefaultAgencyId } = require('../utils/defaultAgencyAgent');
+    if (await isDefaultAgencyId(agency._id)) {
+      return res.status(400).json({
+        message:
+          'This agency is set as the platform default in General Settings and cannot be deleted. Change the default agency first.'
+      });
     }
 
     // Agency admin can delete only their own agency

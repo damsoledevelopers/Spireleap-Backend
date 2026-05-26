@@ -15,6 +15,11 @@ const leadScoringService = require('../services/leadScoringService');
 const webhookService = require('../services/webhookService');
 const encryptionService = require('../services/encryptionService');
 const { normalizePhoneToE164 } = require('../utils/phone');
+const { resolveLeadCustomerDisplayContacts } = require('../utils/defaultAgencyAgent');
+const {
+  findLeadsByCustomerEmail,
+  expandLeadsToCustomerInquiries
+} = require('../utils/leadCustomerQuery');
 const activityService = require('../services/activityService');
 const multer = require('multer');
 const path = require('path');
@@ -252,23 +257,19 @@ const normalizeLeadData = (lead) => {
 // @access  Private
 router.get('/my-inquiries', auth, async (req, res) => {
   try {
-    const userEmail = req.user.email;
-    const inquiries = await Lead.find({ 'contact.email': userEmail })
-      .populate('property', 'title slug images price location')
-      .populate('interestedProperties.property', 'title slug images price location')
-      .populate('agency', 'name logo')
-      .populate('assignedAgent', 'firstName lastName email profileImage')
-      .sort('-createdAt');
+    const leads = await findLeadsByCustomerEmail(req.user.email);
+    const expanded = expandLeadsToCustomerInquiries(leads);
 
-    // Decrypt contact information
-    const decryptedInquiries = inquiries.map(lead => {
-      const leadObj = lead.toObject();
-      if (leadObj.contact) {
-        leadObj.contact = encryptionService.decryptLeadContact(leadObj.contact);
-      }
-      normalizeLeadData(leadObj);
-      return leadObj;
-    });
+    const decryptedInquiries = await Promise.all(
+      expanded.map(async (leadObj) => {
+        if (leadObj.contact) {
+          leadObj.contact = encryptionService.decryptLeadContact(leadObj.contact);
+        }
+        normalizeLeadData(leadObj);
+        const display = await resolveLeadCustomerDisplayContacts(leadObj);
+        return { ...leadObj, ...display };
+      })
+    );
 
     res.json(decryptedInquiries);
   } catch (error) {
@@ -789,32 +790,67 @@ router.post('/:id/contact-agent', auth, async (req, res) => {
     const leadWithDecryptedContact = lead.toObject();
     leadWithDecryptedContact.contact = decryptedContact;
 
-    if (!lead.assignedAgent) {
-      // If no agent assigned, notify agency admin
-      const agencyAdmins = await User.find({
-        role: 'agency_admin',
-        agency: lead.agency?._id,
-        isActive: true
-      });
+    let emailSent = false;
+    let notifiedRecipient = null;
 
-      if (agencyAdmins.length > 0) {
-        // Send to first agency admin
-        await emailService.sendContactAgentRequest(leadWithDecryptedContact, agencyAdmins[0], lead.agency);
+    const leadObjForDisplay = lead.toObject();
+    const display = await resolveLeadCustomerDisplayContacts(leadObjForDisplay);
+    const displayAgent = display.displayAgent;
+    const displayAgency = display.displayAgency;
 
-        // Add a note
+    if (displayAgent) {
+      notifiedRecipient = displayAgent;
+      try {
+        const mailResult = await emailService.sendContactAgentRequest(
+          leadWithDecryptedContact,
+          displayAgent,
+          displayAgency || lead.agency
+        );
+        emailSent = Boolean(mailResult);
+      } catch (emailErr) {
+        console.error('Contact agent email failed (non-fatal):', emailErr);
+      }
+
+      if (!lead.assignedAgent) {
         lead.notes.push({
-          note: `Customer ${decryptedContact.firstName} requested to contact agent. No agent assigned, notified admin ${agencyAdmins[0].firstName}.`,
-          createdBy: lead.agency?._id, // System or Agency account if possible, using req.user.id for now
+          note: `Customer ${decryptedContact.firstName} requested to contact agent. No agent on lead; used ${display.usingDefaultAgent ? 'default' : 'fallback'} agent ${displayAgent.firstName || ''}.`,
+          createdBy: req.user.id,
           createdAt: new Date()
         });
-      } else {
-        return res.status(400).json({ message: 'No agent or administrator available for this inquiry' });
       }
     } else {
-      await emailService.sendContactAgentRequest(leadWithDecryptedContact, lead.assignedAgent, lead.agency);
+      const agencyIdForAdmin = displayAgency?._id || lead.agency?._id || lead.agency;
+      const agencyAdmins = agencyIdForAdmin
+        ? await User.find({
+            role: 'agency_admin',
+            agency: agencyIdForAdmin,
+            isActive: true
+          }).select('firstName lastName email phone')
+        : [];
+
+      if (agencyAdmins.length === 0) {
+        return res.status(400).json({ message: 'No agent or administrator available for this inquiry' });
+      }
+
+      notifiedRecipient = agencyAdmins[0];
+      try {
+        const mailResult = await emailService.sendContactAgentRequest(
+          leadWithDecryptedContact,
+          agencyAdmins[0],
+          displayAgency || lead.agency
+        );
+        emailSent = Boolean(mailResult);
+      } catch (emailErr) {
+        console.error('Contact agent admin email failed (non-fatal):', emailErr);
+      }
+
+      lead.notes.push({
+        note: `Customer ${decryptedContact.firstName} requested to contact agent. No agent assigned, notified admin ${agencyAdmins[0].firstName}.`,
+        createdBy: req.user.id,
+        createdAt: new Date()
+      });
     }
 
-    // Add communication record
     lead.communications.push({
       type: 'email',
       subject: 'Contact Agent Request',
@@ -826,13 +862,31 @@ router.post('/:id/contact-agent', auth, async (req, res) => {
 
     lead.activityLog.push({
       action: 'communication_added',
-      details: { description: 'Contact Agent Request sent by customer' },
+      details: {
+        description: 'Contact Agent Request sent by customer',
+        emailSent
+      },
       performedBy: req.user.id
     });
 
     await lead.save();
 
-    res.json({ message: 'Agent has been notified and will contact you soon' });
+    const agentContact = notifiedRecipient
+      ? {
+          name: [notifiedRecipient.firstName, notifiedRecipient.lastName].filter(Boolean).join(' ').trim(),
+          email: notifiedRecipient.email || null,
+          phone: notifiedRecipient.phone || null
+        }
+      : null;
+
+    let message = 'You can contact your agent using the details below.';
+    if (emailSent) {
+      message = 'Agent has been notified. You can also reach them directly below.';
+    } else if (!agentContact?.email && !agentContact?.phone) {
+      message = 'Your contact request was recorded. The team will reach out soon.';
+    }
+
+    res.json({ message, emailSent, agentContact });
   } catch (error) {
     console.error('Contact agent error:', error);
     res.status(500).json({ message: 'Server error' });
@@ -909,7 +963,7 @@ router.post('/', optionalAuth, [
       }
     }
 
-    // If no agency determined, try default (skip when user explicitly chose "No agency")
+    // If no agency determined, try first active agency (skip when user explicitly chose "No agency")
     if (!agencyId && !agencyExplicitlyNone) {
       const defaultAgency = await Agency.findOne({ isActive: true }).sort({ createdAt: 1 });
       if (!defaultAgency) {
@@ -2316,59 +2370,82 @@ router.delete('/:id/reminders/:reminderId', auth, checkModulePermission('leads',
 });
 
 // @route   PUT /api/leads/:id/assign
-// @desc    Assign lead to agent
+// @desc    Assign lead to agent (or clear assignment with null / empty assignedAgent)
 // @access  Private
 router.put('/:id/assign', auth, checkModulePermission('leads', 'edit'), [
-  body('assignedAgent').notEmpty().withMessage('Agent ID is required')
+  body('assignedAgent').optional({ nullable: true })
 ], async (req, res) => {
   try {
-    // Fetch lead and agent in parallel for better performance
-    const [lead, agent] = await Promise.all([
-      Lead.findById(req.params.id).populate('agency', 'name').populate('property', 'title slug'),
-      req.body.assignedAgent ? User.findById(req.body.assignedAgent).select('firstName lastName team email') : null
-    ]);
+    const rawAgent = req.body.assignedAgent;
+    const assignedAgentId =
+      rawAgent === null || rawAgent === undefined || rawAgent === '' || rawAgent === '__none__'
+        ? null
+        : rawAgent;
+
+    const lead = await Lead.findById(req.params.id).populate('agency', 'name').populate('property', 'title slug');
 
     if (!lead) {
       return res.status(404).json({ message: 'Lead not found' });
     }
 
-    if (!agent) {
-      return res.status(404).json({ message: 'Agent not found' });
+    let agent = null;
+    if (assignedAgentId) {
+      agent = await User.findById(assignedAgentId).select('firstName lastName team email agency');
+      if (!agent) {
+        return res.status(404).json({ message: 'Agent not found' });
+      }
+
+      const leadAgencyId = lead.agency?._id
+        ? lead.agency._id.toString()
+        : (lead.agency?.toString() || lead.agency || null);
+      const agentAgencyId = agent.agency ? agent.agency.toString() : null;
+      if (leadAgencyId && agentAgencyId && leadAgencyId !== agentAgencyId) {
+        return res.status(403).json({
+          message: 'Cannot assign agents from different agencies',
+          code: 'AGENT_AGENCY_MISMATCH'
+        });
+      }
     }
 
     // Capture previous assignment
     const previousAgentId = lead.assignedAgent;
 
     // Update lead assignment fields
-    lead.assignedAgent = req.body.assignedAgent;
+    lead.assignedAgent = assignedAgentId;
     lead.assignedBy = req.user.id;
 
+    const previousAgentKey = previousAgentId ? String(previousAgentId) : '';
+    const newAgentKey = assignedAgentId ? String(assignedAgentId) : '';
+
     // Log Assignment Change
-    if (String(previousAgentId) !== String(req.body.assignedAgent)) {
+    if (previousAgentKey !== newAgentKey) {
       lead.activityLog.push({
         action: 'assignment_change',
         details: {
           field: 'assignedAgent',
           oldValue: previousAgentId,
-          newValue: req.body.assignedAgent,
-          description: 'Lead manually assigned to a new agent'
+          newValue: assignedAgentId,
+          description: assignedAgentId
+            ? 'Lead manually assigned to a new agent'
+            : 'Agent removed from lead'
         },
         performedBy: req.user.id
       });
     }
 
-    // Set reporting manager (if provided, otherwise use current user if they're a manager)
-    if (req.body.reportingManager) {
-      lead.reportingManager = req.body.reportingManager;
-    } else if (req.user.role === 'agency_admin' || req.user.isTeamLead) {
-      lead.reportingManager = req.user.id;
-    }
+    // Set reporting manager / team only when assigning an agent
+    if (assignedAgentId && agent) {
+      if (req.body.reportingManager) {
+        lead.reportingManager = req.body.reportingManager;
+      } else if (req.user.role === 'agency_admin' || req.user.isTeamLead) {
+        lead.reportingManager = req.user.id;
+      }
 
-    // Set team (if provided, otherwise get from assigned agent)
-    if (req.body.team) {
-      lead.team = req.body.team;
-    } else if (agent.team) {
-      lead.team = agent.team;
+      if (req.body.team) {
+        lead.team = req.body.team;
+      } else if (agent.team) {
+        lead.team = agent.team;
+      }
     }
 
     // Normalize priority before saving to prevent validation errors

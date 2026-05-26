@@ -233,9 +233,19 @@ router.get('/', [
       .limit(limit);
 
     const total = await User.countDocuments(filter);
+    const { getDefaultAgencyAgentIdStrings } = require('../utils/defaultAgencyAgent');
+    const platformDefaults = await getDefaultAgencyAgentIdStrings();
+    const usersWithFlags = users.map((u) => {
+      const obj = u.toObject ? u.toObject() : { ...u };
+      obj.isPlatformDefault = Boolean(
+        platformDefaults.defaultAgentId &&
+          String(platformDefaults.defaultAgentId) === String(obj._id)
+      );
+      return obj;
+    });
 
     res.json({
-      users,
+      users: usersWithFlags,
       pagination: {
         current: page,
         pages: Math.ceil(total / limit),
@@ -761,6 +771,14 @@ router.delete('/:id', [
     const user = await User.findById(req.params.id);
     if (!user) {
       return res.status(404).json({ message: 'User not found' });
+    }
+
+    const { isDefaultAgentId } = require('../utils/defaultAgencyAgent');
+    if (await isDefaultAgentId(user._id)) {
+      return res.status(400).json({
+        message:
+          'This user is set as the platform default agent in General Settings and cannot be deleted. Change the default agent first.'
+      });
     }
 
     // Authorization Logic

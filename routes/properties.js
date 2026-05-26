@@ -11,11 +11,20 @@ const Transaction = require('../models/Transaction');
 const activityService = require('../services/activityService');
 const PropertyType = require('../models/PropertyType');
 const { ensureDefaultPropertyTypes, isValidPropertyTypeSlug } = require('../utils/propertyTypeValidation');
+const {
+  getDefaultAgencyAgentIds,
+  pickFallbackAgentForAgency
+} = require('../utils/defaultAgencyAgent');
 
 const router = express.Router();
 
 const COMPLETION_STATUS_VALUES = ['off_plan', 'under_construction', 'ready_to_move'];
 const LEGACY_COMPLETION_AS_PROPERTY_TYPE = ['off_plan', 'ready_to_move', 'under_construction'];
+const PROPERTY_ASSIGNABLE_AGENT_ROLES = ['agent', 'agency_admin'];
+
+function isAssignablePropertyAgent(user) {
+  return Boolean(user && PROPERTY_ASSIGNABLE_AGENT_ROLES.includes(user.role));
+}
 
 function normalizePropertyRecord(property) {
   const obj = property?.toObject ? property.toObject() : { ...property };
@@ -25,6 +34,43 @@ function normalizePropertyRecord(property) {
     obj.propertyType = 'other';
   }
   return obj;
+}
+
+function escapeRegExp(string) {
+  return String(string).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function uniqSortedLocationStrings(arr) {
+  return [...new Set((arr || []).filter(Boolean).map(String).map((s) => s.trim()).filter(Boolean))].sort(
+    (a, b) => a.localeCompare(b)
+  );
+}
+
+/** Resolve agency + agent for bookings (agent-only listings inherit agency; agency-only picks a default agent). */
+async function resolvePropertyAgencyAndAgent(property) {
+  let agencyId = property.agency?._id || property.agency || null;
+  let agentId = property.agent?._id || property.agent || null;
+
+  if (agentId && !agencyId) {
+    const agentUser = await User.findById(agentId).select('agency isActive');
+    if (!agentUser?.isActive) {
+      agentId = null;
+    } else if (agentUser.agency) {
+      agencyId = agentUser.agency;
+    }
+  }
+
+  if (agencyId && !agentId) {
+    agentId = await pickFallbackAgentForAgency(agencyId);
+  }
+
+  if (!agencyId || !agentId) {
+    const defaults = await getDefaultAgencyAgentIds();
+    if (!agencyId && defaults.agencyId) agencyId = defaults.agencyId;
+    if (!agentId && defaults.agentId) agentId = defaults.agentId;
+  }
+
+  return { agencyId, agentId };
 }
 
 // @route   GET /api/properties/filter-options
@@ -184,6 +230,34 @@ router.get('/filter-options', optionalAuth, async (req, res) => {
     });
   } catch (error) {
     console.error('Get property filter options error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   GET /api/properties/location-areas
+// @desc    Neighborhoods/landmarks for active listings in the selected country/state/city
+// @access  Public
+router.get('/location-areas', optionalAuth, async (req, res) => {
+  try {
+    const country = String(req.query.country || '').trim();
+    if (!country) {
+      return res.json({ areas: [] });
+    }
+
+    const state = String(req.query.state || '').trim();
+    const city = String(req.query.city || '').trim();
+    const filter = { status: 'active', 'location.country': new RegExp(escapeRegExp(country), 'i') };
+    if (state) filter['location.state'] = new RegExp(escapeRegExp(state), 'i');
+    if (city) filter['location.city'] = new RegExp(escapeRegExp(city), 'i');
+
+    const [neighborhoods, landmarks] = await Promise.all([
+      Property.distinct('location.neighborhood', filter),
+      Property.distinct('location.landmark', filter)
+    ]);
+
+    res.json({ areas: uniqSortedLocationStrings([...(neighborhoods || []), ...(landmarks || [])]) });
+  } catch (error) {
+    console.error('Get property location areas error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
@@ -670,7 +744,7 @@ router.put('/:id/assign', [
 
     // Validate agent
     const agent = await User.findById(req.body.agent);
-    if (!agent || agent.role !== 'agent') {
+    if (!isAssignablePropertyAgent(agent)) {
       return res.status(404).json({ message: 'Agent not found' });
     }
 
@@ -709,7 +783,6 @@ router.put('/:id/assign', [
 router.get('/my-properties', auth, async (req, res) => {
   try {
     const userEmail = req.user.email;
-    const Lead = require('../models/Lead');
     // Ensure Transaction model is registered
     let Transaction;
     try {
@@ -718,19 +791,21 @@ router.get('/my-properties', auth, async (req, res) => {
       Transaction = require('../models/Transaction');
     }
 
-    // 1. Inquired properties
-    const inquiries = await Lead.find({ 'contact.email': userEmail })
-      .populate({
-        path: 'property',
-        populate: [
-          { path: 'agency', select: 'name logo' },
-          { path: 'agent', select: 'firstName lastName email' }
-        ]
-      })
-      .sort({ createdAt: -1 });
+    const {
+      findLeadsByCustomerEmail,
+      collectInquiredPropertiesFromLeads,
+      PROPERTY_POPULATE,
+      INTERESTED_PROPERTY_POPULATE
+    } = require('../utils/leadCustomerQuery');
+
+    const inquiries = await findLeadsByCustomerEmail(userEmail, [
+      PROPERTY_POPULATE,
+      INTERESTED_PROPERTY_POPULATE
+    ]);
+    const inquiredProperties = collectInquiredPropertiesFromLeads(inquiries);
 
     // 2. Purchased/Rented properties via transactions
-    const customerLeadsIds = await Lead.find({ 'contact.email': userEmail }).distinct('_id');
+    const customerLeadsIds = inquiries.map((l) => l._id);
     const transactions = await Transaction.find({
       lead: { $in: customerLeadsIds }
     }).populate({
@@ -743,10 +818,12 @@ router.get('/my-properties', auth, async (req, res) => {
 
     const purchased = transactions.filter(t => t.type === 'sale' && t.status === 'completed').map(t => t.property);
     const rented = transactions.filter(t => t.type === 'rent' && t.status === 'completed').map(t => t.property);
-    const booked = transactions.filter(t => t.status === 'pending').map(t => t.property);
+    const booked = transactions
+      .filter(t => ['pending_approval', 'approved', 'pending'].includes(t.status))
+      .map(t => t.property);
 
     res.json({
-      inquired: inquiries.map(i => i.property).filter(Boolean),
+      inquired: inquiredProperties,
       purchased: purchased.filter(Boolean),
       rented: rented.filter(Boolean),
       booked: booked.filter(Boolean)
@@ -988,7 +1065,7 @@ router.post('/:id/book', auth, async (req, res) => {
       const alreadyBooked = await Transaction.findOne({
         property: req.params.id,
         lead: { $in: leadIds },
-        status: { $in: ['pending', 'completed'] }
+        status: { $in: ['pending_approval', 'approved', 'pending', 'completed'] }
       });
       if (alreadyBooked) {
         return res.status(400).json({ message: 'You have already booked this property' });
@@ -1000,6 +1077,27 @@ router.post('/:id/book', auth, async (req, res) => {
     if (!customerUser) {
       return res.status(404).json({ message: 'Customer account not found' });
     }
+
+    const { agencyId, agentId } = await resolvePropertyAgencyAndAgent(property);
+
+    if (!agencyId) {
+      return res.status(400).json({
+        message:
+          'This property is not linked to an agency yet. Assign an agency or agent on the property, then try booking again.'
+      });
+    }
+
+    if (!agentId) {
+      return res.status(400).json({
+        message:
+          'No agent is available for this property. Assign an agent to the property or add an active agent under the agency.'
+      });
+    }
+
+    const bookingAgent =
+      property.agent && String(property.agent._id || property.agent) === String(agentId)
+        ? property.agent
+        : await User.findById(agentId).select('firstName lastName email phone');
 
     // 1. Find or create a Lead for this customer
     // Consolidate leads by email to prevent duplicates in the lead panel
@@ -1022,11 +1120,12 @@ router.post('/:id/book', auth, async (req, res) => {
         });
       }
 
-      // Update main property to the latest one if needed, or keep original
-      // The user wants one lead for multiple properties, so we maintain internal list
+      if (!lead.agency && agencyId) lead.agency = agencyId;
+      if (!lead.assignedAgent && agentId) lead.assignedAgent = agentId;
+      lead.property = property._id;
+
       await lead.save();
     } else {
-      // Ensure phone is present as it's required by Lead schema
       const userPhone = customerUser.phone || '0000000000';
       lead = new Lead({
         property: property._id,
@@ -1035,8 +1134,8 @@ router.post('/:id/book', auth, async (req, res) => {
           action: 'booked',
           date: new Date()
         }],
-        agency: property.agency,
-        assignedAgent: property.agent,
+        agency: agencyId,
+        assignedAgent: agentId,
         contact: {
           firstName: customerUser.firstName || 'Customer',
           lastName: customerUser.lastName || 'User',
@@ -1049,10 +1148,6 @@ router.post('/:id/book', auth, async (req, res) => {
         status: 'new',
         source: 'website'
       });
-
-      if (!lead.agency) {
-        return res.status(400).json({ message: 'Property has no associated agency' });
-      }
 
       await lead.save();
     }
@@ -1073,21 +1168,16 @@ router.post('/:id/book', auth, async (req, res) => {
     const transaction = new Transaction({
       property: property._id,
       lead: lead._id,
-      agency: property.agency || lead.agency,
-      agent: property.agent || lead.assignedAgent,
+      agency: agencyId,
+      agent: agentId,
       type: property.listingType === 'rent' ? 'rent' : 'sale',
       amount: transactionAmount,
-      status: 'pending',
+      status: 'pending_approval',
       transactionDate: new Date(),
       paymentMethod: 'other',
-      notes: 'Booked by customer',
+      notes: 'Booking request — awaiting admin approval',
       createdBy: req.user.id
     });
-
-    // Ensure agency and agent are present as they are required by Transaction schema
-    if (!transaction.agency || !transaction.agent) {
-      return res.status(400).json({ message: 'Agency or Agent information missing on property' });
-    }
 
     // Calculate commission (Default 2% if not specified)
     const commPerc = lead.inquiry?.commissionPercentage || 2;
@@ -1109,8 +1199,8 @@ router.post('/:id/book', auth, async (req, res) => {
         await emailService.sendBookingRequestNotification(
           property,
           customerUser,
-          property.agent,
-          property.agency
+          bookingAgent,
+          property.agency || agencyId
         );
       } catch (notifError) {
         console.error('Error sending booking notifications:', notifError);
@@ -1237,7 +1327,7 @@ router.post('/', [
     // Validate agent only if provided (required for agents, optional for agency_admin)
     if (req.body.agent) {
       const agent = await User.findById(req.body.agent);
-      if (!agent || agent.role !== 'agent') {
+      if (!isAssignablePropertyAgent(agent)) {
         return res.status(404).json({ message: 'Agent not found' });
       }
       if (!agent.isActive) {

@@ -7,6 +7,14 @@ const Currency = require('../models/Currency');
 const Location = require('../models/Location');
 const { auth, authorize, optionalAuth, checkModulePermission } = require('../middleware/auth');
 const emailService = require('../services/emailService');
+const Agency = require('../models/Agency');
+const User = require('../models/User');
+const {
+  KEY_DEFAULT_AGENCY,
+  KEY_DEFAULT_AGENT,
+  getDefaultAgencyAgentIds,
+  validateDefaultAgencyAgentSettings
+} = require('../utils/defaultAgencyAgent');
 
 const router = express.Router();
 
@@ -34,14 +42,23 @@ router.get('/dropdown-options', optionalAuth, async (req, res) => {
       // use defaults
     }
 
-    const currencyDocs = await Currency.find({ isDeleted: false })
-      .select('currencyCode aedRate')
+    const currencyDocs = await Currency.find({ isDeleted: false, status: { $ne: false } })
+      .select('currencyCode currencyName aedRate status')
       .sort({ currencyCode: 1 })
       .lean();
 
     const currencyCodes = (currencyDocs || [])
       .map((d) => String(d.currencyCode || '').trim().toUpperCase())
       .filter(Boolean);
+
+    const budgetCurrencyOptions = (currencyDocs || []).map((d) => {
+      const code = String(d.currencyCode || '').trim().toUpperCase();
+      const name = String(d.currencyName || '').trim();
+      return {
+        value: code,
+        label: name ? `${code} — ${name}` : code,
+      };
+    }).filter((o) => o.value);
 
     // Base hub currency is always available for display/settings
     if (!currencyCodes.includes('AED')) {
@@ -90,7 +107,15 @@ router.get('/dropdown-options', optionalAuth, async (req, res) => {
       spokenLanguages: languages.map((name) => ({ value: name, label: name })),
       logLevels: ['debug', 'info', 'warn', 'error'],
       backupFrequencies: ['hourly', 'daily', 'weekly', 'monthly'],
-      budgetCurrencies: ['USD', 'EUR', 'GBP'],
+      budgetCurrencies: currencyCodes.length > 0 ? currencyCodes : ['AED', 'USD', 'INR'],
+      budgetCurrencyOptions:
+        budgetCurrencyOptions.length > 0
+          ? budgetCurrencyOptions
+          : [
+              { value: 'AED', label: 'AED' },
+              { value: 'USD', label: 'USD' },
+              { value: 'INR', label: 'INR' },
+            ],
       inquiryTimelines: [
         { value: 'immediate', label: 'Immediate' },
         { value: '1_month', label: '1 Month' },
@@ -647,6 +672,44 @@ router.get('/', auth, checkModulePermission('settings', 'view'), async (req, res
   }
 });
 
+// @route   GET /api/settings/default-agency-agent/options
+// @desc    Agencies/agents for default assignment dropdowns in General Settings
+// @access  Private
+router.get('/default-agency-agent/options', auth, checkModulePermission('settings', 'view'), async (req, res) => {
+  try {
+    const defaults = await getDefaultAgencyAgentIds();
+    const agencies = await Agency.find({ isActive: { $ne: false } })
+      .select('name')
+      .sort({ name: 1 })
+      .lean();
+
+    const agencyFilter = req.query.agency || defaults.agencyId;
+    const agentQuery = {
+      isActive: true,
+      role: { $in: ['agent', 'agency_admin'] }
+    };
+    if (agencyFilter) agentQuery.agency = agencyFilter;
+
+    const agents = await User.find(agentQuery)
+      .select('firstName lastName email role agency')
+      .sort({ firstName: 1, lastName: 1 })
+      .lean();
+
+    res.json({
+      defaultAgencyId: defaults.agencyId ? String(defaults.agencyId) : '',
+      defaultAgentId: defaults.agentId ? String(defaults.agentId) : '',
+      agencies: agencies.map((a) => ({ value: String(a._id), label: a.name || 'Unnamed agency' })),
+      agents: agents.map((a) => ({
+        value: String(a._id),
+        label: `${[a.firstName, a.lastName].filter(Boolean).join(' ').trim() || a.email} (${a.role === 'agency_admin' ? 'Admin' : 'Agent'})`
+      }))
+    });
+  } catch (error) {
+    console.error('Get default agency/agent options error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
 // @route   GET /api/settings/:key
 // @desc    Get specific setting by key
 // @access  Private (Super Admin)
@@ -682,6 +745,25 @@ router.put('/', [
     const updates = [];
     const settings = req.body.settings;
     let emailSettingsUpdated = false;
+
+    if (
+      Object.prototype.hasOwnProperty.call(settings, KEY_DEFAULT_AGENCY) ||
+      Object.prototype.hasOwnProperty.call(settings, KEY_DEFAULT_AGENT)
+    ) {
+      const validation = await validateDefaultAgencyAgentSettings(
+        settings[KEY_DEFAULT_AGENCY],
+        settings[KEY_DEFAULT_AGENT]
+      );
+      if (!validation.ok) {
+        return res.status(400).json({ message: validation.message });
+      }
+      if (Object.prototype.hasOwnProperty.call(settings, KEY_DEFAULT_AGENCY)) {
+        settings[KEY_DEFAULT_AGENCY] = validation.agencyId ? String(validation.agencyId) : '';
+      }
+      if (Object.prototype.hasOwnProperty.call(settings, KEY_DEFAULT_AGENT)) {
+        settings[KEY_DEFAULT_AGENT] = validation.agentId ? String(validation.agentId) : '';
+      }
+    }
 
     for (const [key, value] of Object.entries(settings)) {
       // Infers category from the key (e.g., "email.smtpHost" => "email")

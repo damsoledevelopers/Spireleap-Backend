@@ -797,6 +797,86 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
       0
     );
 
+    let transactionFilter = { ...dateFilter };
+    if (req.user.role === 'agency_admin' && agencyIdForFilter) {
+      transactionFilter.agency = agencyIdForFilter;
+    } else if (req.user.role === 'agent') {
+      const agentId =
+        req.user.id && mongoose.Types.ObjectId.isValid(req.user.id)
+          ? new mongoose.Types.ObjectId(req.user.id)
+          : req.user.id;
+      transactionFilter.agent = agentId;
+      if (req.user.agency) transactionFilter.agency = req.user.agency;
+    }
+
+    const [invoiceByStatusAgg, invoiceFinancialsAgg, recentCompletedInvoices] = await Promise.all([
+      Transaction.aggregate([
+        { $match: transactionFilter },
+        { $group: { _id: '$status', count: { $sum: 1 } } }
+      ]),
+      Transaction.aggregate([
+        { $match: transactionFilter },
+        {
+          $addFields: {
+            paid: { $ifNull: ['$paymentDetails.amountPaid', 0] },
+            due: {
+              $max: [
+                0,
+                {
+                  $subtract: [
+                    { $ifNull: ['$amount', 0] },
+                    { $ifNull: ['$paymentDetails.amountPaid', 0] }
+                  ]
+                }
+              ]
+            }
+          }
+        },
+        {
+          $group: {
+            _id: null,
+            totalBookingValue: { $sum: { $ifNull: ['$amount', 0] } },
+            totalCollected: { $sum: '$paid' },
+            totalOutstanding: { $sum: '$due' }
+          }
+        }
+      ]),
+      Transaction.find({ ...transactionFilter, status: 'completed' })
+        .sort({ updatedAt: -1 })
+        .limit(5)
+        .populate('property', 'title slug')
+        .select('amount paymentDetails transactionDate updatedAt property status')
+        .lean()
+    ]);
+
+    const invoiceByStatus = {};
+    invoiceByStatusAgg.forEach((row) => {
+      invoiceByStatus[row._id || 'unknown'] = row.count;
+    });
+    const fin = invoiceFinancialsAgg[0] || {};
+    const bookingRequests =
+      (invoiceByStatus.pending_approval || 0) + (invoiceByStatus.pending || 0);
+
+    const invoiceStats = {
+      byStatus: invoiceByStatus,
+      bookingRequests,
+      paymentsInProgress: invoiceByStatus.approved || 0,
+      completedInvoices: invoiceByStatus.completed || 0,
+      rejected: invoiceByStatus.rejected || 0,
+      totalBookings: Object.values(invoiceByStatus).reduce((s, n) => s + (Number(n) || 0), 0),
+      totalBookingValue: fin.totalBookingValue || 0,
+      totalCollected: fin.totalCollected || 0,
+      totalOutstanding: fin.totalOutstanding || 0,
+      recentCompleted: recentCompletedInvoices.map((t) => ({
+        id: t._id,
+        propertyTitle: t.property?.title || 'Property',
+        amount: t.amount,
+        amountPaid: t.paymentDetails?.amountPaid ?? 0,
+        completedAt: t.updatedAt || t.transactionDate,
+        receiptNumber: t.paymentDetails?.receiptNumber || null
+      }))
+    };
+
     // Agency analysis (super_admin and agency_admin only)
     let agencyAnalysis = [];
     if (req.user.role === 'super_admin' || req.user.role === 'agency_admin') {
@@ -907,7 +987,8 @@ router.get('/reports', auth, checkModulePermission('analytics', 'view'), async (
         activeLeads: a.activeLeads ?? 0,
         conversionRate: a.totalLeads > 0 ? pctDisplay((a.convertedLeads / a.totalLeads) * 100) : 0
       })),
-      agencyAnalysis
+      agencyAnalysis,
+      invoiceStats
     });
   } catch (error) {
     console.error('Get report stats error:', error);
