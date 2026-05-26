@@ -337,7 +337,8 @@ router.get('/:id/receipt', auth, async (req, res) => {
       return res.status(403).json({ message: 'Access denied' });
     }
 
-    const doc = await paymentService.generateReceiptPDF(req.params.id);
+    const displayCurrency = String(req.query.currency || 'AED').trim().toUpperCase();
+    const doc = await paymentService.generateReceiptPDF(req.params.id, { displayCurrency });
 
     res.setHeader('Content-Type', 'application/pdf');
     res.setHeader('Content-Disposition', `attachment; filename=receipt-${payment.receipt?.number || req.params.id}.pdf`);

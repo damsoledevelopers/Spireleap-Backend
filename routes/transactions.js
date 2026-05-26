@@ -382,7 +382,7 @@ router.get('/my-transactions/:id', auth, async (req, res) => {
             property: transaction.property?._id,
             agency: agencyId,
             amount: transaction.amount || 0,
-            currency: 'USD',
+            currency: 'AED',
             paymentMethod: 'other',
             gateway: 'none',
             gatewayPaymentId: 'restored_' + Date.now(),
@@ -952,7 +952,7 @@ router.put('/:id', [
               property: transaction.property,
               agency: transaction.agency,
               amount: amountPaid,
-              currency: transaction.currency || 'INR',
+              currency: 'AED',
               paymentMethod: mappedMethod,
               gateway: 'none',
               status: 'completed',
@@ -977,7 +977,9 @@ router.put('/:id', [
             await payment.save();
           }
 
-          const invoicePdfBuffer = await paymentService.generateReceiptPDFBuffer(payment._id.toString());
+          const invoicePdfBuffer = await paymentService.generateReceiptPDFBuffer(payment._id.toString(), {
+            displayCurrency: 'AED'
+          });
           const propertyTitle = (updatedTransaction.property?.title || 'property').replace(/\s+/g, '-');
           const fileName = `invoice-${propertyTitle}.pdf`;
           await emailService.sendBookingFinalizedEmail(updatedTransaction, { invoicePdfBuffer, fileName });

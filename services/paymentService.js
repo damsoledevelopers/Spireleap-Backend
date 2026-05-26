@@ -6,6 +6,7 @@ const fs = require('fs');
 const Payment = require('../models/Payment');
 const Transaction = require('../models/Transaction');
 const Lead = require('../models/Lead');
+const { BASE_CURRENCY, loadCurrencyRates, formatMoneyFromAed } = require('../utils/moneyFormat');
 
 /** Same logo as customer sidebar (`/NovaKeys.png`) */
 function resolveNovaKeysLogoPath() {
@@ -322,6 +323,11 @@ class PaymentService {
    */
   async generateReceiptPDF(paymentId, opts = {}) {
     try {
+      const displayCurrency = String(opts.displayCurrency || BASE_CURRENCY).trim().toUpperCase();
+      const ratesByCode = opts.ratesByCode || (await loadCurrencyRates());
+      const fmt = (amountAed) =>
+        formatMoneyFromAed(amountAed, displayCurrency, ratesByCode, { forPdf: true });
+
       const payment = await Payment.findById(paymentId)
         .populate({
           path: 'transaction',
@@ -379,6 +385,24 @@ class PaymentService {
       }
       y += 62;
 
+      const invoiceDate = payment.paymentDate || transaction?.transactionDate || new Date();
+      doc.fontSize(10).fillColor(GRAY_400).text('INVOICE', left, y);
+      doc
+        .fontSize(10)
+        .fillColor(GRAY_700)
+        .text(
+          `Date: ${new Date(invoiceDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })}`,
+          left + pageWidth - 140,
+          y,
+          { width: 140, align: 'right' }
+        );
+      y += 22;
+      doc
+        .fontSize(9)
+        .fillColor(GRAY_400)
+        .text(`All amounts in ${displayCurrency} (converted from ${BASE_CURRENCY} listing values)`, left, y);
+      y += 18;
+
       // 2. Customer details
       doc.fontSize(10).fillColor(GRAY_400).text('Customer', left, y);
       y += 16;
@@ -402,28 +426,59 @@ class PaymentService {
       doc.fontSize(10).fillColor(GRAY_700).text(`Type: ${transType.charAt(0).toUpperCase() + transType.slice(1)}`, left, y);
       y += 32;
 
-      // 4. Transaction details: total amount, due amount, receipt ID
-      doc.fontSize(10).fillColor(GRAY_400).text('Transaction details', left, y);
+      if (agency?.name) {
+        doc.fontSize(10).fillColor(GRAY_400).text('Agency', left, y);
+        y += 16;
+        doc.fontSize(11).fillColor(GRAY_900).text(agency.name, left, y);
+        y += 24;
+      }
+
+      // 4. Transaction details (amounts stored in AED, displayed in selected currency)
+      doc.fontSize(10).fillColor(GRAY_400).text('Payment summary', left, y);
       y += 20;
 
-      const currency = payment.currency || 'INR';
-      const formatAmount = (n) => `${currency === 'INR' ? '₹' : currency + ' '}${Number(n || 0).toLocaleString()}`;
-      const totalAmount = Number(transaction?.amount ?? payment.amount ?? 0);
-      const paymentDetails = transaction?.paymentDetails;
-      const dueAmount = paymentDetails?.dueAmount ?? Math.max(0, totalAmount - (paymentDetails?.amountPaid ?? (payment.status === 'completed' ? Number(payment.amount ?? 0) : 0)));
-      const receiptId = payment.receipt?.number || transaction?._id?.toString().slice(-8).toUpperCase() || payment._id?.toString().slice(-8).toUpperCase() || 'N/A';
+      const totalAmountAed = Number(transaction?.amount ?? 0);
+      const paymentDetails = transaction?.paymentDetails || {};
+      const amountPaidAed = Number(
+        paymentDetails.amountPaid != null && paymentDetails.amountPaid !== ''
+          ? paymentDetails.amountPaid
+          : payment.status === 'completed'
+            ? Number(payment.amount ?? totalAmountAed)
+            : 0
+      );
+      const dueAmountAed = Number(
+        paymentDetails.dueAmount ?? Math.max(0, totalAmountAed - amountPaidAed)
+      );
+      const thisPaymentAed = Number(payment.amount ?? 0);
+      const receiptId =
+        payment.receipt?.number ||
+        transaction?._id?.toString().slice(-8).toUpperCase() ||
+        payment._id?.toString().slice(-8).toUpperCase() ||
+        'N/A';
+      const paymentMethod = (payment.paymentMethod || paymentDetails.paymentMethod || '—')
+        .toString()
+        .replace(/_/g, ' ');
 
-      doc.fontSize(11).fillColor(GRAY_700).text('Total amount', left, y);
-      doc.fontSize(11).fillColor(GRAY_900).text(formatAmount(totalAmount), left + 120, y);
-      y += 22;
+      const row = (label, value, bold = false) => {
+        doc.fontSize(11).fillColor(GRAY_700).text(label, left, y);
+        if (bold) doc.font('Helvetica-Bold');
+        doc.fontSize(11).fillColor(GRAY_900).text(String(value), left + 140, y, { width: pageWidth - 140, align: 'right' });
+        if (bold) doc.font('Helvetica');
+        y += 22;
+      };
 
-      doc.fontSize(11).fillColor(GRAY_700).text('Due amount', left, y);
-      doc.fontSize(11).fillColor(GRAY_900).text(formatAmount(dueAmount), left + 120, y);
-      y += 22;
-
-      doc.fontSize(11).fillColor(GRAY_700).text('Receipt ID', left, y);
-      doc.fontSize(11).fillColor(GRAY_900).text(receiptId, left + 120, y);
-      y += 40;
+      row('Total amount', fmt(totalAmountAed));
+      row('Amount paid (total)', fmt(amountPaidAed));
+      row('Balance due', fmt(dueAmountAed));
+      row('This payment', fmt(thisPaymentAed), true);
+      row('Payment method', paymentMethod.charAt(0).toUpperCase() + paymentMethod.slice(1));
+      row(
+        'Payment date',
+        new Date(invoiceDate).toLocaleDateString('en-GB', { day: 'numeric', month: 'short', year: 'numeric' })
+      );
+      row('Receipt ID', receiptId);
+      row('Status', (payment.status || transaction?.status || '—').toString().replace(/_/g, ' '));
+      y += 18;
 
       // Minimal footer
       doc.fontSize(9).fillColor(GRAY_400).text('Thank you. For queries, contact your agent or agency.', left, y, { width: pageWidth });
@@ -449,8 +504,8 @@ class PaymentService {
   /**
    * Same receipt PDF as portal download, returned as Buffer for email attachment.
    */
-  async generateReceiptPDFBuffer(paymentId) {
-    return this.generateReceiptPDF(paymentId, { asBuffer: true });
+  async generateReceiptPDFBuffer(paymentId, opts = {}) {
+    return this.generateReceiptPDF(paymentId, { ...opts, asBuffer: true });
   }
 }
 
