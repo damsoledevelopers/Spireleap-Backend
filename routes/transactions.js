@@ -573,7 +573,7 @@ router.post('/my-transactions/:id/booking-proof', auth, (req, res) => {
         });
       }
 
-      const wasApproved = transaction.status === 'approved';
+      const wasInstallmentUpload = ['approved', 'pending'].includes(transaction.status);
       const fileUrl = getFileUrl(req, req.file.path);
       const proofDoc = {
         name: req.file.originalname,
@@ -587,7 +587,7 @@ router.post('/my-transactions/:id/booking-proof', auth, (req, res) => {
 
       transaction.documents = [...(transaction.documents || []), proofDoc];
       transaction.customerConfirmed = true;
-      if (wasApproved) {
+      if (wasInstallmentUpload) {
         transaction.status = 'pending_approval';
         transaction.notes = [transaction.notes, 'Customer submitted payment proof for review.']
           .filter(Boolean)
@@ -601,7 +601,7 @@ router.post('/my-transactions/:id/booking-proof', auth, (req, res) => {
         .populate('agent', 'firstName lastName email');
 
       res.json({
-        message: wasApproved
+        message: wasInstallmentUpload
           ? 'Payment proof uploaded. Admin will verify and update your balance.'
           : 'Proof uploaded. Admin will review your booking request.',
         transaction: enrichTransactionPaymentSummary(populated)
@@ -707,7 +707,8 @@ router.post('/:id/approve', [
         await lead.save();
       }
     } else {
-      transaction.status = 'approved';
+      // Keep installment bookings in pending state so customer can continue proof uploads.
+      transaction.status = 'pending';
     }
 
     await transaction.save();
@@ -720,7 +721,7 @@ router.post('/:id/approve', [
       .populate('approval.reviewedBy', 'firstName lastName');
 
     res.json({
-      message: pending <= 0 ? 'Booking approved and fully paid' : 'Booking approved',
+      message: pending <= 0 ? 'Booking approved and fully paid' : 'Partial payment recorded. Waiting for next proof upload.',
       transaction: enrichTransactionPaymentSummary(populated)
     });
   } catch (error) {
@@ -845,6 +846,9 @@ router.post('/:id/record-payment', [
         lead.convertedAt = new Date();
         await lead.save();
       }
+    } else {
+      // Re-open as pending until customer uploads the next payment proof.
+      transaction.status = 'pending';
     }
 
     await transaction.save();
@@ -856,7 +860,7 @@ router.post('/:id/record-payment', [
       .populate('agent', 'firstName lastName email');
 
     res.json({
-      message: pending <= 0 ? 'Payment recorded — booking completed' : 'Partial payment recorded',
+      message: pending <= 0 ? 'Payment recorded — booking completed' : 'Partial payment recorded. Booking remains pending.',
       transaction: enrichTransactionPaymentSummary(populated)
     });
   } catch (error) {

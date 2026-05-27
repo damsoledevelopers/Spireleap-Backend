@@ -1,4 +1,4 @@
-﻿const mongoose = require('mongoose');
+const mongoose = require('mongoose');
 const { isPostalDigitsOrEmpty, POSTAL_DIGITS_VALIDATION_MESSAGE } = require('../utils/postalCode');
 
 const ALPHA_TEXT_REGEX = /^[A-Za-z\s.'-]+$/;
@@ -173,6 +173,17 @@ const propertySchema = new mongoose.Schema({
   amenities: [{
     type: mongoose.Schema.Types.ObjectId,
     ref: 'Amenity'
+  }],
+  floorPlanImages: [{
+    url: {
+      type: String,
+      required: true
+    },
+    alt: String,
+    order: {
+      type: Number,
+      default: 0
+    }
   }],
   images: [{
     url: {

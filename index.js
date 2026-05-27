@@ -22,6 +22,7 @@ app.use(helmet({
 const allowedOrigins = [
   process.env.CLIENT_URL,
   'http://localhost:3000',
+  'http://192.168.0.41:3000',
   'http://localhost:3001',
   'https://spireleap-frontend.vercel.app',
   /^https:\/\/.*\.vercel\.com$/
