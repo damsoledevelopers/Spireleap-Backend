@@ -33,11 +33,45 @@ function normalizePropertyRecord(property) {
     obj.completionStatus = obj.propertyType;
     obj.propertyType = 'other';
   }
+  if (obj.completionStatus !== 'off_plan') {
+    obj.handoverQuarter = null;
+  }
   return obj;
+}
+
+function normalizeHandoverQuarter(body, existingCompletionStatus) {
+  if (!body || typeof body !== 'object') return;
+  const cs =
+    body.completionStatus !== undefined && body.completionStatus !== null
+      ? body.completionStatus
+      : existingCompletionStatus;
+  if (cs !== 'off_plan') {
+    if ('handoverQuarter' in body) body.handoverQuarter = null;
+    return;
+  }
+  if (body.handoverQuarter === '' || body.handoverQuarter === undefined) {
+    body.handoverQuarter = null;
+  } else if (typeof body.handoverQuarter === 'string') {
+    body.handoverQuarter = body.handoverQuarter.trim();
+  }
 }
 
 function escapeRegExp(string) {
   return String(string).replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function buildHandoverQuarterFilter(value) {
+  const hq = String(value || '').trim();
+  if (!hq) return null;
+  if (/^\d{4}$/.test(hq)) {
+    return {
+      $or: [
+        { handoverQuarter: hq },
+        { handoverQuarter: new RegExp(`^Q[1-4]\\s+${hq}$`, 'i') }
+      ]
+    };
+  }
+  return { handoverQuarter: hq };
 }
 
 function uniqSortedLocationStrings(arr) {
@@ -272,6 +306,7 @@ router.get('/', optionalAuth, [
   }),
   query('propertyType').optional(),
   query('completionStatus').optional().isIn(COMPLETION_STATUS_VALUES),
+  query('handoverQuarter').optional().trim(),
   query('listingType').optional().isIn(['sale', 'rent', 'both']),
   query('city').optional(),
   query('state').optional(),
@@ -285,6 +320,8 @@ router.get('/', optionalAuth, [
   query('bedrooms').optional().isInt({ min: 0 }),
   query('bedroomsMin').optional().isInt({ min: 0 }),
   query('bathrooms').optional().isInt({ min: 0 }),
+  query('bathroomsMin').optional().isInt({ min: 0 }),
+  query('rentPeriod').optional().isIn(['yearly', 'monthly', 'weekly', 'daily']),
   query('minArea').optional().isFloat({ min: 0 }),
   query('maxArea').optional().isFloat({ min: 0 }),
   query('featured').optional().isBoolean(),
@@ -366,6 +403,13 @@ router.get('/', optionalAuth, [
       };
       if (!filter.$and) filter.$and = [];
       filter.$and.push(completionClause);
+    }
+    if (req.query.handoverQuarter) {
+      const handoverClause = buildHandoverQuarterFilter(req.query.handoverQuarter);
+      if (handoverClause) {
+        if (!filter.$and) filter.$and = [];
+        filter.$and.push(handoverClause);
+      }
     }
     if (req.query.listingType) {
       filter.listingType = req.query.listingType;
@@ -483,8 +527,13 @@ router.get('/', optionalAuth, [
       filter['specifications.bedrooms'] = br;
       filter['specifications.isStudio'] = { $ne: true };
     }
-    if (req.query.bathrooms) {
-      filter['specifications.bathrooms'] = parseInt(req.query.bathrooms);
+    if (req.query.bathroomsMin) {
+      filter['specifications.bathrooms'] = { $gte: parseInt(req.query.bathroomsMin, 10) };
+    } else if (req.query.bathrooms) {
+      filter['specifications.bathrooms'] = parseInt(req.query.bathrooms, 10);
+    }
+    if (req.query.rentPeriod) {
+      filter['price.rent.period'] = String(req.query.rentPeriod).trim().toLowerCase();
     }
     if (req.query.balconies) {
       filter['specifications.balconies'] = parseInt(req.query.balconies);
@@ -1232,6 +1281,7 @@ router.post('/', [
   body('description').optional({ values: 'falsy' }).trim(),
   body('propertyType').trim().notEmpty().withMessage('Property type is required'),
   body('completionStatus').optional({ nullable: true }).isIn([...COMPLETION_STATUS_VALUES, '', null]).withMessage('Invalid completion status'),
+  body('handoverQuarter').optional({ nullable: true }).isString().trim(),
   body('listingType').isIn(['sale', 'rent', 'both']).withMessage('Invalid listing type'),
   body('location.address').optional({ values: 'falsy' }).trim(),
   body('location.city').optional({ values: 'falsy' }).trim(),
@@ -1308,6 +1358,7 @@ router.post('/', [
     } else if (req.body.completionStatus && !COMPLETION_STATUS_VALUES.includes(req.body.completionStatus)) {
       return res.status(400).json({ message: 'Invalid completion status' });
     }
+    normalizeHandoverQuarter(req.body);
 
     if (req.user.role === 'agency_admin' && req.body.agency && req.body.agency !== req.user.agency) {
       return res.status(403).json({ message: 'You can only create properties for your agency' });
@@ -1578,6 +1629,7 @@ router.put('/:id', [
     ) {
       return res.status(400).json({ message: 'Invalid completion status' });
     }
+    normalizeHandoverQuarter(req.body, property.completionStatus);
 
     // Capture old state for status change notifications
     const oldStatus = property.status;

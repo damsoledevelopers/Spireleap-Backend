@@ -37,6 +37,12 @@ const propertySchema = new mongoose.Schema({
     enum: ['off_plan', 'under_construction', 'ready_to_move', null],
     default: null
   },
+  handoverQuarter: {
+    type: String,
+    trim: true,
+    default: null
+  },
+
   listingType: {
     type: String,
     enum: ['sale', 'rent', 'both'],

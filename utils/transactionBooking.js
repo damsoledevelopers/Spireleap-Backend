@@ -39,10 +39,36 @@ function isBookingAwaitingApproval(status) {
   return BOOKING_REQUEST_STATUSES.includes(status);
 }
 
+function hasActiveDocumentRequest(transaction) {
+  const approval = transaction?.approval || {};
+  if (!approval.awaitingAdditionalDocuments) return false;
+  const msg = (approval.documentRequestMessage || '').trim();
+  const docs = approval.requiredDocuments || [];
+  return Boolean(msg || docs.length > 0);
+}
+
 function canCustomerUploadProof(transaction) {
   if (!transaction) return false;
-  if (isBookingAwaitingApproval(transaction.status)) return true;
-  if (transaction.status === 'approved' && getPendingAmount(transaction) > 0) return true;
+  if (hasActiveDocumentRequest(transaction)) return true;
+
+  const balanceDue = getPendingAmount(transaction) > 0;
+  const hasProof = (transaction.documents || []).some((d) => d && d.url);
+
+  // Partially approved installment: status stays "pending" until next proof
+  if (['approved', 'pending'].includes(transaction.status) && balanceDue) {
+    return true;
+  }
+
+  // Initial booking request — first proof only (unless admin requested more above)
+  if (transaction.status === 'pending_approval' && !hasProof) {
+    return true;
+  }
+
+  // Legacy pending booking with no proof yet
+  if (transaction.status === 'pending' && !hasProof) {
+    return true;
+  }
+
   return false;
 }
 
@@ -54,5 +80,6 @@ module.exports = {
   getPendingAmount,
   enrichTransactionPaymentSummary,
   isBookingAwaitingApproval,
+  hasActiveDocumentRequest,
   canCustomerUploadProof
 };

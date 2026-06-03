@@ -1,4 +1,4 @@
-﻿const mongoose = require('mongoose');
+const mongoose = require('mongoose');
 
 const transactionSchema = new mongoose.Schema({
   property: {
@@ -93,7 +93,15 @@ const transactionSchema = new mongoose.Schema({
       ref: 'User'
     },
     reviewedAt: Date,
-    adminNote: String
+    adminNote: String,
+    awaitingAdditionalDocuments: { type: Boolean, default: false },
+    documentRequestMessage: String,
+    requiredDocuments: [{ type: String, trim: true }],
+    documentRequestedAt: Date,
+    documentRequestedBy: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: 'User'
+    }
   },
   createdBy: {
     type: mongoose.Schema.Types.ObjectId,

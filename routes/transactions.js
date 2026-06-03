@@ -21,6 +21,7 @@ const {
   getAmountPaid,
   getPendingAmount,
   isBookingAwaitingApproval,
+  hasActiveDocumentRequest,
   canCustomerUploadProof,
 } = require('../utils/transactionBooking');
 const { findLeadsByCustomerEmail } = require('../utils/leadCustomerQuery');
@@ -565,12 +566,15 @@ router.post('/my-transactions/:id/booking-proof', auth, (req, res) => {
       }
 
       if (!canCustomerUploadProof(transaction)) {
-        return res.status(400).json({
-          message:
-            transaction.status === 'approved'
-              ? 'No balance due on this booking, or it is not awaiting payment proof.'
-              : `Cannot upload proof when booking status is "${transaction.status}"`
-        });
+        const hasProof = (transaction.documents || []).some((d) => d && d.url);
+        let message = `Cannot upload proof when booking status is "${transaction.status}"`;
+        if (transaction.status === 'approved' || transaction.status === 'pending') {
+          message = 'No balance due on this booking, or it is not awaiting payment proof.';
+        } else if (transaction.status === 'pending_approval' && hasProof) {
+          message =
+            'Your proof is already submitted and under review. If admin asked for more documents, use Upload requested docs when that option appears.';
+        }
+        return res.status(400).json({ message });
       }
 
       const wasInstallmentUpload = ['approved', 'pending'].includes(transaction.status);
@@ -585,9 +589,20 @@ router.post('/my-transactions/:id/booking-proof', auth, (req, res) => {
         uploadedAt: new Date()
       };
 
+      const hadDocumentRequest = hasActiveDocumentRequest(transaction);
+
       transaction.documents = [...(transaction.documents || []), proofDoc];
       transaction.customerConfirmed = true;
-      if (wasInstallmentUpload) {
+      if (hadDocumentRequest) {
+        transaction.approval = {
+          ...(transaction.approval || {}),
+          awaitingAdditionalDocuments: false
+        };
+        transaction.status = 'pending_approval';
+        transaction.notes = [transaction.notes, 'Customer uploaded additional document(s) for review.']
+          .filter(Boolean)
+          .join('\n');
+      } else if (wasInstallmentUpload) {
         transaction.status = 'pending_approval';
         transaction.notes = [transaction.notes, 'Customer submitted payment proof for review.']
           .filter(Boolean)
@@ -601,9 +616,11 @@ router.post('/my-transactions/:id/booking-proof', auth, (req, res) => {
         .populate('agent', 'firstName lastName email');
 
       res.json({
-        message: wasInstallmentUpload
-          ? 'Payment proof uploaded. Admin will verify and update your balance.'
-          : 'Proof uploaded. Admin will review your booking request.',
+        message: hadDocumentRequest
+          ? 'Additional documents uploaded. Admin will review your booking again.'
+          : wasInstallmentUpload
+            ? 'Payment proof uploaded. Admin will verify and update your balance.'
+            : 'Proof uploaded. Admin will review your booking request.',
         transaction: enrichTransactionPaymentSummary(populated)
       });
     } catch (error) {
@@ -684,7 +701,10 @@ router.post('/:id/approve', [
     transaction.approval = {
       reviewedBy: req.user.id,
       reviewedAt: new Date(),
-      adminNote: req.body.adminNote || transaction.approval?.adminNote || ''
+      adminNote: req.body.adminNote || transaction.approval?.adminNote || '',
+      awaitingAdditionalDocuments: false,
+      documentRequestMessage: '',
+      requiredDocuments: []
     };
     transaction.paymentDetails = {
       ...(transaction.paymentDetails || {}),
@@ -763,7 +783,10 @@ router.post('/:id/reject', [
     transaction.approval = {
       reviewedBy: req.user.id,
       reviewedAt: new Date(),
-      adminNote: req.body.adminNote
+      adminNote: req.body.adminNote,
+      awaitingAdditionalDocuments: false,
+      documentRequestMessage: '',
+      requiredDocuments: []
     };
     await transaction.save();
 
@@ -778,6 +801,89 @@ router.post('/:id/reject', [
     });
   } catch (error) {
     console.error('Reject booking error:', error);
+    res.status(500).json({ message: 'Server error' });
+  }
+});
+
+// @route   POST /api/transactions/:id/request-documents
+// @desc    Keep booking pending and ask customer for more documents
+// @access  Private
+router.post('/:id/request-documents', [
+  auth,
+  checkModulePermission('leads', 'edit'),
+  body('message').trim().notEmpty().withMessage('Message to customer is required'),
+  body('requiredDocuments')
+    .optional()
+    .custom((val) => {
+      if (val === undefined || val === null || val === '') return true;
+      if (Array.isArray(val)) return true;
+      if (typeof val === 'string') return true;
+      throw new Error('requiredDocuments must be a list or comma-separated string');
+    })
+], async (req, res) => {
+  try {
+    const errors = validationResult(req);
+    if (!errors.isEmpty()) {
+      return res.status(400).json({
+        message: errors.array().map((e) => e.msg).join(' '),
+        errors: errors.array()
+      });
+    }
+
+    const transaction = await Transaction.findById(req.params.id);
+    if (!transaction) {
+      return res.status(404).json({ message: 'Transaction not found' });
+    }
+
+    if (req.user.role === 'agency_admin' && transaction.agency.toString() !== req.user.agency) {
+      return res.status(403).json({ message: 'Access denied' });
+    }
+
+    if (!isBookingAwaitingApproval(transaction.status)) {
+      return res.status(400).json({
+        message: `Only pending booking requests can be held for more documents (current: ${transaction.status})`
+      });
+    }
+
+    let requiredDocs = [];
+    if (Array.isArray(req.body.requiredDocuments)) {
+      requiredDocs = req.body.requiredDocuments.map((s) => String(s).trim()).filter(Boolean);
+    } else if (typeof req.body.requiredDocuments === 'string' && req.body.requiredDocuments.trim()) {
+      requiredDocs = req.body.requiredDocuments
+        .split(/[\n,;]+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+    }
+
+    const message = req.body.message.trim();
+    transaction.status = 'pending_approval';
+    transaction.approval = {
+      ...(transaction.approval || {}),
+      awaitingAdditionalDocuments: true,
+      documentRequestMessage: message,
+      requiredDocuments: requiredDocs,
+      documentRequestedAt: new Date(),
+      documentRequestedBy: req.user.id
+    };
+    transaction.notes = [transaction.notes, `Admin requested more documents: ${message}`]
+      .filter(Boolean)
+      .join('\n');
+
+    await transaction.save();
+
+    const populated = await Transaction.findById(transaction._id)
+      .populate('property', 'title slug')
+      .populate('lead')
+      .populate('agency', 'name')
+      .populate('agent', 'firstName lastName email')
+      .populate('approval.documentRequestedBy', 'firstName lastName');
+
+    res.json({
+      message: 'Booking kept pending. Customer can upload the requested documents.',
+      transaction: enrichTransactionPaymentSummary(populated)
+    });
+  } catch (error) {
+    console.error('Request booking documents error:', error);
     res.status(500).json({ message: 'Server error' });
   }
 });
